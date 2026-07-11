@@ -595,6 +595,14 @@ class AriaCapture:
             if self.local_certs_dir:
                 streaming_config.security_options.local_certs_root_path = self.local_certs_dir
             self._streaming_manager.streaming_config = streaming_config
+            try:
+                # Clear a stale session left by a previous run/crash -- without
+                # this, start_streaming() can fail or hang (same fix as bridge.py).
+                self._streaming_manager.stop_streaming()
+                time.sleep(1.0)
+                logger.info("Stopped any existing Aria stream before starting a new one.")
+            except Exception as exc:
+                logger.warning("No existing stream stopped before start: %s", exc)
             self._streaming_manager.start_streaming()
             self._started_streaming_internally = True
             logger.info("Started streaming via DeviceClient (%s / %s).", self.streaming_interface, self.profile_name)

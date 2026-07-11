@@ -165,6 +165,7 @@ def scan_capture_rgb(
     aggregator: ApplianceScanAggregator,
     duration_s: Optional[float] = None,
     sample_hz: float = ENERGY_FRAME_SAMPLE_HZ,
+    pace_playback: bool = False,
 ) -> None:
     """Drive a started-or-startable AriaCapture through the detector.
 
@@ -172,6 +173,13 @@ def scan_capture_rgb(
     rotates each RAW frame upright, and folds detections into ``aggregator``.
     Runs until the VRS ends, or ``duration_s`` of device time elapses.
     Blocking; owns start/stop of ``capture``.
+
+    ``pace_playback`` (VRS only): faster-than-realtime playback plus the
+    drop-stale image buffer means slow YOLO inference would see only a few
+    frames of the whole file. Subscribing a no-op imu-right consumer engages
+    the capture layer's subscriber-aware backpressure, pacing playback to
+    detection throughput so the sampler sees the full recording. Leave False
+    for live capture, where drop-stale is the correct behavior.
     """
     from aria_capture import rotate_upright  # local import keeps module torch-only-optional
 
@@ -191,6 +199,8 @@ def scan_capture_rgb(
         aggregator.observe_frame(detector.detect(upright), upright)
 
     capture.subscribe("camera-rgb", on_rgb)
+    if pace_playback:
+        capture.subscribe("imu-right", lambda _sample: None)
     capture.start()
     try:
         while True:
@@ -220,7 +230,7 @@ def main() -> None:
     detector = EnergyDetector()
     aggregator = ApplianceScanAggregator()
     capture = AriaCapture(source=CAPTURE_SOURCE_VRS, vrs_path=args.vrs)
-    scan_capture_rgb(capture, detector, aggregator, duration_s=args.duration)
+    scan_capture_rgb(capture, detector, aggregator, duration_s=args.duration, pace_playback=True)
 
     print(f"\nFrames sampled: {aggregator.frames_observed}")
     counts = aggregator.counts()

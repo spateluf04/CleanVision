@@ -142,7 +142,11 @@ def main() -> None:
     aggregator = ApplianceScanAggregator()
 
     wall_start = time.monotonic()
-    scan_capture_rgb(capture, detector, aggregator, duration_s=duration, sample_hz=args.sample_hz)
+    scan_capture_rgb(
+        capture, detector, aggregator,
+        duration_s=duration, sample_hz=args.sample_hz,
+        pace_playback=not args.live,  # see scan_capture_rgb docstring
+    )
     scan_wall_seconds = time.monotonic() - wall_start
 
     out_dir = Path(args.out).expanduser()

@@ -247,6 +247,36 @@ HEALTHCHECK_OUTPUT_DIR = BASE_DIR / "healthcheck_out"
 HEALTHCHECK_MAX_LIVE_SKEW_MS = 100.0
 HEALTHCHECK_RATE_TOLERANCE = 0.10
 
+# Energy audit (energy_detector.py, energy_estimator.py, roomscan.py, energy_report.py)
+ENERGY_YOLO_WEIGHTS = "yolov8n.pt"
+ENERGY_DETECT_CONFIDENCE = 0.35
+# RGB frames are sampled at this rate (device time) for detection; the camera
+# runs faster but per-frame YOLO on every frame buys nothing for a room scan.
+ENERGY_FRAME_SAMPLE_HZ = 2.0
+# Minimum box area as a fraction of the frame; rejects sliver false positives.
+ENERGY_MIN_BOX_AREA_FRAC = 0.001
+# COCO classes treated as energy-drawing appliances. Keys are exact YOLO/COCO
+# class names; per-class typical draw and daily usage assumptions drive the
+# kWh estimate (hackathon-grade priors, not measurements).
+ENERGY_CATALOG = {
+    "tv": {"display": "Television", "watts_active": 100.0, "watts_standby": 2.0, "hours_per_day": 5.0},
+    "laptop": {"display": "Laptop", "watts_active": 50.0, "watts_standby": 1.0, "hours_per_day": 6.0},
+    "refrigerator": {"display": "Refrigerator", "watts_active": 150.0, "watts_standby": 0.0, "hours_per_day": 8.0},
+    "microwave": {"display": "Microwave", "watts_active": 1100.0, "watts_standby": 3.0, "hours_per_day": 0.25},
+    "oven": {"display": "Oven", "watts_active": 2300.0, "watts_standby": 2.0, "hours_per_day": 0.5},
+    "toaster": {"display": "Toaster", "watts_active": 900.0, "watts_standby": 0.0, "hours_per_day": 0.1},
+    "hair drier": {"display": "Hair dryer", "watts_active": 1500.0, "watts_standby": 0.0, "hours_per_day": 0.1},
+    "cell phone": {"display": "Phone (charging)", "watts_active": 5.0, "watts_standby": 0.5, "hours_per_day": 2.0},
+    "clock": {"display": "Clock", "watts_active": 2.0, "watts_standby": 0.0, "hours_per_day": 24.0},
+}
+ENERGY_COST_PER_KWH_USD = 0.17
+ROOMSCAN_OUTPUT_DIR = BASE_DIR / "roomscan_out"
+ROOMSCAN_REPORT_JSON_NAME = "roomscan_report.json"
+ROOMSCAN_REPORT_HTML_NAME = "roomscan_report.html"
+ROOMSCAN_CROP_DIR_NAME = "crops"
+# Live mode scans for this long by default; VRS mode consumes the whole file.
+ROOMSCAN_LIVE_DURATION_SECONDS = 60.0
+
 
 if __name__ == "__main__":
     print(f"Aria ML config loaded from {BASE_DIR}")

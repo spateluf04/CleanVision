@@ -94,6 +94,8 @@ python3 energy_detector.py --vrs /path/to/recording.vrs             # detection-
 ```
 Requires `ultralytics` (auto-downloads `yolov8n.pt` on first run; gitignored via `*.pt`). Outputs `roomscan_report.json`, per-instance crops, and a self-contained `roomscan_report.html` (base64-inlined crops — openable anywhere with no server). Exit 0 if appliances were found, 2 if none, per `roomscan.py:main()`.
 
+Optional: `pip install google-genai` + `export GEMINI_API_KEY=...` (never commit the key) upgrades the report's `recommendations` field to Gemini-vision-generated, photo-grounded suggestions; without a key set, or if the call fails for any reason, it silently falls back to the rule-based engine — see `energy_gemini.py`.
+
 ### Aria SDK / streaming troubleshooting
 
 - `The SDK is not paired with the device` -> `aria auth pair` then `aria auth check`.
@@ -125,6 +127,8 @@ Single `AriaCapture` class, two backends behind one callback interface (`source=
 ### Energy audit pipeline (`roomscan.py` and friends)
 
 `roomscan.py` orchestrates: `AriaCapture` (either backend) -> `energy_detector.scan_capture_rgb()` subscribes to camera-rgb, samples frames at ~2 Hz **device time**, rotates RAW frames upright before YOLO -> `ApplianceScanAggregator` counts instances with the **max-simultaneous rule** (per class, count = most detections seen in any single frame; pan-away/pan-back never double-counts) and keeps the best-confidence crop per instance slot -> `energy_estimator.estimate_room()` maps counts through `ENERGY_CATALOG` priors -> `energy_report.render_html()` writes the self-contained page. Two subtleties: (1) in VRS mode `scan_capture_rgb(pace_playback=True)` subscribes a no-op imu-right consumer to engage the capture layer's backpressure — without it, faster-than-realtime playback plus the drop-stale image slot starves slow YOLO inference down to a few frames per file; live mode must keep `pace_playback=False` (drop-stale is correct there). (2) `ApplianceScanAggregator` and `energy_estimator` are deliberately torch-free (ultralytics is lazily imported inside `EnergyDetector`) so `tests/test_energy.py` runs without YOLO.
+
+`roomscan.py:build_report()`'s `recommendations` field comes from `energy_gemini.get_recommendations()`, which sends the scan's best-confidence crops (biggest energy users first, capped at `GEMINI_MAX_CROPS`) to Gemini vision when `GEMINI_API_KEY` is set, and otherwise — or on any Gemini failure — falls back to `energy_recommendations.generate_recommendations()`'s pure rule engine. This is deliberately the *only* call site that can hit the network: the live dashboard's per-tick recommendations panel and its instant Stop-Scan summary dialog (`roomscan_dashboard.py`) call `generate_recommendations()` directly and always stay rule-based, since a network call on a ~1s UI tick would be reckless. `energy_gemini.py` mirrors `energy_detector.py`'s lazy-import trick (the `google-genai` SDK is only imported inside `_generate_content()`), so `tests/test_energy_gemini.py` — like `tests/test_energy.py` — never needs the optional dependency installed.
 
 ### VRS/trajectory pipeline (`vrs_index_fingertip_tracker.py`)
 

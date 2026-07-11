@@ -47,7 +47,7 @@ from config import (
 )
 from energy_detector import ApplianceScanAggregator, EnergyDetector, scan_capture_rgb
 from energy_estimator import estimate_room
-from energy_recommendations import generate_recommendations
+from energy_gemini import get_recommendations
 from energy_report import render_html
 from energy_sessions import register_session
 from logging_utils import get_logger
@@ -126,9 +126,11 @@ def build_report(
         "devices": estimate["devices"],
         "totals": estimate["totals"],
         # No live frame at report-build time, so context-dependent rules
-        # (e.g. "TV in a bright room") simply don't fire here -- only the
-        # device/co-occurrence and threshold rules apply to a finished scan.
-        "recommendations": generate_recommendations(estimate["devices"], estimate["totals"]),
+        # (e.g. "TV in a bright room") simply don't fire in the rule-based
+        # fallback here -- only the device/co-occurrence and threshold rules
+        # apply. get_recommendations() uses Gemini vision on the crops when
+        # GEMINI_API_KEY is set, falling back to the rule engine otherwise.
+        "recommendations": get_recommendations(estimate["devices"], estimate["totals"], aggregator.best_crops()),
     }
 
 

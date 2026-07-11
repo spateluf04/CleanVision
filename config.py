@@ -308,6 +308,19 @@ ROOMSCAN_LIVE_DURATION_SECONDS = 60.0
 # decoupled from ENERGY_FRAME_SAMPLE_HZ so UI push rate != detection rate.
 ROOMSCAN_LIVE_TICK_SECONDS = 1.0
 
+# Gemini vision recommendations (energy_gemini.py) -- optional enhancement over
+# energy_recommendations.py's rule engine. Enabled only when GEMINI_API_KEY is
+# set in the environment (never hardcode a key here); falls back to the rule
+# engine on any failure so a live demo never hard-depends on the network. Only
+# wired into roomscan.py:build_report() (the once-per-finished-scan report) --
+# the live dashboard's per-tick recommendations panel and its instant
+# Stop-Scan summary dialog intentionally stay rule-based-only.
+GEMINI_API_KEY_ENV_VAR = "GEMINI_API_KEY"
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MAX_CROPS = 6              # cap images sent per request (cost/latency)
+GEMINI_MAX_RECOMMENDATIONS = 5
+GEMINI_TIMEOUT_SECONDS = 12.0
+
 # RoomScan live dashboard (PyQt5, roomscan_dashboard.py). Reuses the shared
 # dark theme palette above (PANEL_BG/SURFACE_BG/ACCENT/SUCCESS/TEXT/MUTED/
 # BORDER) for visual consistency with training_dashboard.py; these are

@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Aria Hand Reactor</title>
+  <style>
+    :root {
+      --bg: #040b10;
+      --panel: rgba(9, 26, 38, 0.88);
+      --cyan: #00d4ff;
+      --green: #00ff9d;
+      --yellow: #ffd54a;
+      --red: #ff4d6d;
+      --text: #e6f7ff;
+      --muted: #7aa4b8;
+      --mono: "SFMono-Regular", "Menlo", "Monaco", monospace;
+      --sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 20% 15%, rgba(0, 212, 255, 0.12), transparent 34%),
+        radial-gradient(circle at 80% 20%, rgba(0, 255, 157, 0.10), transparent 28%),
+        linear-gradient(135deg, #02060a, var(--bg));
+      font-family: var(--sans);
+      overflow: hidden;
+    }
+
+    .shell {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      gap: 14px;
+      height: 100vh;
+      padding: 16px;
+    }
+
+    .topbar, .hud, .panel {
+      border: 1px solid rgba(0, 212, 255, 0.2);
+      background: var(--panel);
+      border-radius: 18px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      padding: 14px 18px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .subtle, .label {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      background: var(--red);
+      box-shadow: 0 0 18px rgba(255, 77, 109, 0.5);
+    }
+
+    .dot.live {
+      background: var(--green);
+      box-shadow: 0 0 18px rgba(0, 255, 157, 0.55);
+    }
+
+    .links {
+      justify-self: end;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    a {
+      color: var(--cyan);
+      text-decoration: none;
+    }
+
+    .nav-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 9px 13px;
+      border-radius: 999px;
+      border: 1px solid rgba(0, 212, 255, 0.35);
+      background: rgba(0, 212, 255, 0.08);
+      color: var(--cyan);
+      font-family: var(--mono);
+      font-size: 12px;
+      transition: border-color 0.16s ease, box-shadow 0.16s ease;
+    }
+
+    .nav-button:hover {
+      border-color: rgba(0, 212, 255, 0.75);
+      box-shadow: 0 0 18px rgba(0, 212, 255, 0.18);
+    }
+
+    .stage-wrap {
+      position: relative;
+      min-height: 0;
+    }
+
+    #gameCanvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+      border-radius: 24px;
+      border: 1px solid rgba(0, 212, 255, 0.18);
+      background: #02070b;
+    }
+
+    .overlay-card {
+      position: absolute;
+      inset: 24px auto auto 24px;
+      width: 310px;
+      padding: 16px;
+      border: 1px solid rgba(0, 255, 157, 0.22);
+      border-radius: 18px;
+      background: rgba(2, 9, 14, 0.76);
+      backdrop-filter: blur(10px);
+    }
+
+    .target {
+      margin-top: 10px;
+      font-family: var(--mono);
+      font-size: 28px;
+      color: var(--green);
+      text-transform: uppercase;
+    }
+
+    .hud {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 12px;
+      padding: 14px;
+      font-family: var(--mono);
+    }
+
+    .hud-item {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .hud-value {
+      font-size: 22px;
+      color: var(--text);
+    }
+
+    .pulse {
+      animation: pulse 0.3s ease;
+    }
+
+    @keyframes pulse {
+      0% { transform: scale(1); }
+      50% { transform: scale(1.08); }
+      100% { transform: scale(1); }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <h1>Aria Hand Reactor</h1>
+        <div class="subtle">Match the prompt with your hand gesture through the glasses</div>
+      </div>
+      <div class="status">
+        <span id="statusDot" class="dot"></span>
+        <span id="statusText">OFFLINE</span>
+      </div>
+      <div class="links"><a class="nav-button" href="/">Back to Dashboard</a></div>
+    </header>
+
+    <main class="stage-wrap">
+      <canvas id="gameCanvas" width="1280" height="720"></canvas>
+      <section class="overlay-card">
+        <div class="label">MAKE THIS GESTURE</div>
+        <div id="targetGesture" class="target">THUMBS UP</div>
+        <p class="subtle">Controls: show the target gesture to score. Flat hand activates shield. Pointing gives a precision bonus.</p>
+      </section>
+    </main>
+
+    <footer class="hud">
+      <div class="hud-item">
+        <span class="label">Score</span>
+        <span id="scoreValue" class="hud-value">0</span>
+      </div>
+      <div class="hud-item">
+        <span class="label">Streak</span>
+        <span id="streakValue" class="hud-value">0</span>
+      </div>
+      <div class="hud-item">
+        <span class="label">Time</span>
+        <span id="timeValue" class="hud-value">60.0</span>
+      </div>
+      <div class="hud-item">
+        <span class="label">Current Gesture</span>
+        <span id="gestureValue" class="hud-value">--</span>
+      </div>
+      <div class="hud-item">
+        <span class="label">Mode</span>
+        <span id="modeValue" class="hud-value">READY</span>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    const gesturePrompts = ["thumbs_up", "thumbs_down", "flat_hand", "fist", "pointing", "peace"];
+    const friendly = {
+      thumbs_up: "THUMBS UP",
+      thumbs_down: "THUMBS DOWN",
+      flat_hand: "FLAT HAND",
+      open_hand: "OPEN HAND",
+      fist: "FIST",
+      pointing: "POINTING",
+      peace: "PEACE"
+    };
+
+    const game = {
+      connected: false,
+      score: 0,
+      streak: 0,
+      timeLeft: 60,
+      target: "thumbs_up",
+      currentGesture: "--",
+      lastGestureAt: 0,
+      lastScoreAt: 0,
+      paused: false,
+      shieldUntil: 0,
+      particles: [],
+      rings: []
+    };
+
+    function setText(id, text) {
+      document.getElementById(id).textContent = text;
+    }
+
+    function setStatus(live) {
+      game.connected = live;
+      document.getElementById("statusDot").classList.toggle("live", live);
+      setText("statusText", live ? "LIVE" : "OFFLINE");
+    }
+
+    function nextTarget() {
+      const choices = gesturePrompts.filter((gesture) => gesture !== game.target);
+      game.target = choices[Math.floor(Math.random() * choices.length)];
+      setText("targetGesture", friendly[game.target] || game.target.toUpperCase());
+      document.getElementById("targetGesture").classList.remove("pulse");
+      void document.getElementById("targetGesture").offsetWidth;
+      document.getElementById("targetGesture").classList.add("pulse");
+    }
+
+    function addBurst(x, y, color) {
+      for (let i = 0; i < 24; i++) {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = 2 + Math.random() * 6;
+        game.particles.push({
+          x,
+          y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 1,
+          color
+        });
+      }
+      game.rings.push({ x, y, r: 20, life: 1, color });
+    }
+
+    function scoreGesture(gesture) {
+      const now = performance.now();
+      if (now - game.lastScoreAt < 450) return;
+      game.lastScoreAt = now;
+      game.score += gesture === "pointing" ? 15 : 10;
+      game.streak += 1;
+      if (game.streak > 0 && game.streak % 5 === 0) {
+        game.score += 25;
+      }
+      addBurst(canvas.width * 0.5, canvas.height * 0.45, "#00ff9d");
+      nextTarget();
+    }
+
+    function handleGesture(gesture) {
+      if (!gesture || gesture === "hand") return;
+      game.currentGesture = gesture;
+      game.lastGestureAt = performance.now();
+      setText("gestureValue", friendly[gesture] || gesture.toUpperCase());
+
+      game.paused = false;
+      if (gesture === "flat_hand" || gesture === "open_hand") {
+        game.shieldUntil = performance.now() + 1200;
+        setText("modeValue", "SHIELD");
+      } else {
+        setText("modeValue", "PLAY");
+      }
+
+      if (gesture === game.target || (game.target === "flat_hand" && gesture === "open_hand")) {
+        scoreGesture(gesture);
+      }
+    }
+
+    function handleDetection(msg) {
+      const hands = msg.hand_gestures || [];
+      if (hands.length === 0) return;
+      const best = hands.slice().sort((a, b) => b.conf - a.conf)[0];
+      handleGesture(best.gesture);
+    }
+
+    function connect() {
+      const ws = new WebSocket("ws://localhost:8765");
+      ws.onopen = () => setStatus(true);
+      ws.onclose = () => {
+        setStatus(false);
+        setTimeout(connect, 2000);
+      };
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "detection") {
+          handleDetection(msg);
+        }
+      };
+    }
+
+    function drawBackground(t) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+      gradient.addColorStop(0, "#04111a");
+      gradient.addColorStop(1, "#02070b");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.strokeStyle = "rgba(0, 212, 255, 0.08)";
+      ctx.lineWidth = 1;
+      for (let x = -80; x < canvas.width + 80; x += 80) {
+        ctx.beginPath();
+        ctx.moveTo(x + Math.sin(t / 700) * 12, 0);
+        ctx.lineTo(x - 120, canvas.height);
+        ctx.stroke();
+      }
+    }
+
+    function drawTarget() {
+      const cx = canvas.width * 0.5;
+      const cy = canvas.height * 0.43;
+      const radius = 104 + Math.sin(performance.now() / 180) * 4;
+
+      ctx.strokeStyle = game.shieldUntil > performance.now() ? "#ffd54a" : "#00d4ff";
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.fillStyle = "#e6f7ff";
+      ctx.font = "700 46px monospace";
+      ctx.textAlign = "center";
+      ctx.fillText(friendly[game.target] || game.target.toUpperCase(), cx, cy + 14);
+
+      ctx.fillStyle = "rgba(122, 164, 184, 0.9)";
+      ctx.font = "18px monospace";
+      ctx.fillText("hold the gesture in view", cx, cy + 58);
+    }
+
+    function updateParticles() {
+      game.particles = game.particles.filter((particle) => {
+        particle.x += particle.vx;
+        particle.y += particle.vy;
+        particle.vy += 0.08;
+        particle.life -= 0.025;
+        return particle.life > 0;
+      });
+      game.rings = game.rings.filter((ring) => {
+        ring.r += 8;
+        ring.life -= 0.035;
+        return ring.life > 0;
+      });
+    }
+
+    function drawParticles() {
+      game.rings.forEach((ring) => {
+        ctx.strokeStyle = ring.color.replace(")", `, ${ring.life})`).replace("rgb", "rgba");
+        ctx.globalAlpha = ring.life;
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(ring.x, ring.y, ring.r, 0, Math.PI * 2);
+        ctx.stroke();
+      });
+      game.particles.forEach((particle) => {
+        ctx.globalAlpha = Math.max(0, particle.life);
+        ctx.fillStyle = particle.color;
+        ctx.beginPath();
+        ctx.arc(particle.x, particle.y, 4, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.globalAlpha = 1;
+    }
+
+    let lastFrame = performance.now();
+    function loop(now) {
+      const dt = Math.min((now - lastFrame) / 1000, 0.05);
+      lastFrame = now;
+      if (!game.paused && game.timeLeft > 0) {
+        game.timeLeft = Math.max(0, game.timeLeft - dt);
+      }
+      if (now - game.lastGestureAt > 2000) {
+        setText("gestureValue", "--");
+        if (!game.paused) setText("modeValue", game.connected ? "PLAY" : "WAITING");
+      }
+      if (game.timeLeft <= 0) {
+        setText("modeValue", "GAME OVER");
+      }
+
+      drawBackground(now);
+      drawTarget();
+      updateParticles();
+      drawParticles();
+
+      setText("scoreValue", String(game.score));
+      setText("streakValue", String(game.streak));
+      setText("timeValue", game.timeLeft.toFixed(1));
+
+      requestAnimationFrame(loop);
+    }
+
+    nextTarget();
+    connect();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>

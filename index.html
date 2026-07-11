@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Meta Project Aria Dashboard</title>
+  <style>
+    :root {
+      --bg: #050d14;
+      --surface: #0a1a26;
+      --surface-2: #0e2333;
+      --border: rgba(0, 212, 255, 0.18);
+      --accent: #00d4ff;
+      --accent-green: #00ff9d;
+      --accent-red: #ff4d6d;
+      --text: #dceef7;
+      --muted: #7aa4b8;
+      --mono: "SFMono-Regular", "Menlo", "Monaco", monospace;
+      --sans: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at top left, rgba(0, 212, 255, 0.08), transparent 32%),
+        radial-gradient(circle at top right, rgba(0, 255, 157, 0.06), transparent 28%),
+        var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+    }
+
+    .dashboard {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 300px;
+      gap: 16px;
+      min-height: 100vh;
+      padding: 16px;
+    }
+
+    .main {
+      display: grid;
+      grid-template-rows: auto auto auto auto auto;
+      gap: 16px;
+      min-width: 0;
+    }
+
+    .panel, .header, .strip {
+      background: linear-gradient(180deg, rgba(11, 27, 39, 0.94), rgba(8, 19, 28, 0.98));
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.04), 0 24px 60px rgba(0, 0, 0, 0.25);
+    }
+
+    .header {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      padding: 16px 18px;
+    }
+
+    .brand {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .brand span,
+    .status-text,
+    .subtle,
+    .label,
+    .mini-label {
+      color: var(--muted);
+    }
+
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      justify-self: center;
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      background: var(--accent-red);
+      box-shadow: 0 0 18px rgba(255, 77, 109, 0.45);
+    }
+
+    .dot.live {
+      background: var(--accent-green);
+      box-shadow: 0 0 18px rgba(0, 255, 157, 0.45);
+    }
+
+    .clock-wrap {
+      justify-self: end;
+      text-align: right;
+      font-family: var(--mono);
+    }
+
+    .nav-actions {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 8px;
+    }
+
+    .nav-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(0, 255, 157, 0.35);
+      background: rgba(0, 255, 157, 0.08);
+      color: var(--accent-green);
+      font-family: var(--mono);
+      font-size: 12px;
+      text-decoration: none;
+      transition: border-color 0.16s ease, box-shadow 0.16s ease;
+    }
+
+    .nav-button:hover {
+      border-color: rgba(0, 255, 157, 0.75);
+      box-shadow: 0 0 18px rgba(0, 255, 157, 0.18);
+    }
+
+    .cameras {
+      display: grid;
+      grid-template-columns: 1.5fr 1fr 1fr;
+      gap: 16px;
+    }
+
+    .camera, .sensor-grid, .env-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .camera {
+      padding: 14px;
+    }
+
+    .camera-label, .panel-title {
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .canvas-wrap {
+      position: relative;
+      border-radius: 14px;
+      overflow: hidden;
+      background: #02070b;
+      border: 1px solid rgba(0, 212, 255, 0.14);
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #02070b;
+    }
+
+    .camera.active .canvas-wrap {
+      box-shadow: 0 0 0 1px rgba(0, 212, 255, 0.18), 0 0 28px rgba(0, 212, 255, 0.12);
+    }
+
+    .overlay {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--mono);
+      font-size: 14px;
+      letter-spacing: 0.22em;
+      color: rgba(220, 238, 247, 0.62);
+      background: linear-gradient(180deg, rgba(2, 7, 11, 0.25), rgba(2, 7, 11, 0.62));
+      pointer-events: none;
+      text-transform: uppercase;
+    }
+
+    .sensor-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .et-panel, .imu-panel, .sidebar, .strip {
+      padding: 14px;
+    }
+
+    .et-eyes {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .imu-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    .imu-card, .metric-card {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(0, 212, 255, 0.1);
+      border-radius: 14px;
+      padding: 12px;
+    }
+
+    .imu-header, .metric-row, .telemetry-row, .bottom-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .metric-row, .telemetry-row {
+      padding: 4px 0;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .bar-stack {
+      display: grid;
+      gap: 8px;
+      margin: 10px 0 12px;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: 26px 1fr 78px;
+      gap: 8px;
+      align-items: center;
+      font-family: var(--mono);
+      font-size: 11px;
+    }
+
+    .bar-track {
+      position: relative;
+      overflow: hidden;
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      transform-origin: left center;
+    }
+
+    .bar-fill {
+      width: 100%;
+      height: 100%;
+      transform-origin: left center;
+      transform: scaleX(0);
+      transition: transform 0.08s ease;
+    }
+
+    .x { background: rgba(255, 87, 87, 0.8); }
+    .y { background: rgba(0, 255, 157, 0.8); }
+    .z { background: rgba(0, 153, 255, 0.8); }
+
+    .wave {
+      width: 100%;
+      height: 88px;
+      border-radius: 10px;
+      background: rgba(2, 7, 11, 0.9);
+      border: 1px solid rgba(0, 212, 255, 0.08);
+    }
+
+    .env-grid {
+      grid-template-columns: 1fr 1fr;
+    }
+
+    .audio-bars {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 8px;
+      align-items: end;
+      height: 140px;
+      margin: 14px 0 12px;
+    }
+
+    .audio-col {
+      display: flex;
+      flex-direction: column;
+      justify-content: end;
+      gap: 8px;
+      align-items: center;
+      height: 100%;
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .audio-meter {
+      width: 100%;
+      height: 100%;
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.05);
+      display: flex;
+      align-items: end;
+      overflow: hidden;
+    }
+
+    .audio-fill {
+      width: 100%;
+      height: 0%;
+      background: linear-gradient(180deg, rgba(0, 212, 255, 0.4), rgba(0, 255, 157, 0.9));
+      transition: height 0.08s ease;
+    }
+
+    .sidebar {
+      display: grid;
+      grid-template-rows: auto auto 1fr auto;
+      gap: 16px;
+      min-width: 0;
+    }
+
+    .compass {
+      display: grid;
+      gap: 14px;
+    }
+
+    .compass-wrap {
+      display: flex;
+      justify-content: center;
+    }
+
+    .needle {
+      transform-origin: 100px 100px;
+      transition: transform 0.5s ease;
+    }
+
+    .telemetry {
+      display: grid;
+      gap: 6px;
+      font-family: var(--mono);
+    }
+
+    .strip {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      font-family: var(--mono);
+    }
+
+    .value {
+      font-family: var(--mono);
+      color: var(--text);
+    }
+
+    .value.large {
+      font-size: 24px;
+    }
+
+    .subtle {
+      font-size: 12px;
+    }
+
+    .gaze-panel {
+      padding: 12px;
+      border-radius: 14px;
+      border: 1px solid rgba(0, 212, 255, 0.12);
+      background: rgba(255, 255, 255, 0.02);
+      display: grid;
+      gap: 10px;
+    }
+
+    .gaze-row, .scene-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .gaze-value {
+      font-family: var(--mono);
+      color: var(--text);
+    }
+
+    .scene-list {
+      display: grid;
+      gap: 6px;
+      max-height: 180px;
+      overflow: auto;
+    }
+
+    .calibrate-btn {
+      padding: 10px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(0, 255, 157, 0.35);
+      background: rgba(0, 255, 157, 0.08);
+      color: var(--accent-green);
+      font-family: var(--mono);
+      cursor: pointer;
+    }
+
+    .calibration-dot {
+      position: fixed;
+      width: 18px;
+      height: 18px;
+      border-radius: 999px;
+      background: var(--accent-green);
+      box-shadow: 0 0 24px rgba(0, 255, 157, 0.65);
+      z-index: 9999;
+      pointer-events: none;
+      display: none;
+      transform: translate(-50%, -50%);
+    }
+
+    @media (max-width: 1240px) {
+      .dashboard {
+        grid-template-columns: 1fr;
+      }
+
+      .sidebar {
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: auto auto;
+      }
+    }
+
+    @media (max-width: 920px) {
+      .cameras,
+      .sensor-row,
+      .env-grid,
+      .imu-grid,
+      .strip,
+      .sidebar {
+        grid-template-columns: 1fr;
+      }
+
+      .header {
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+
+      .clock-wrap,
+      .status {
+        justify-self: start;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+    <div class="main">
+      <div class="header">
+        <div class="brand">
+          <h1>Meta Project Aria</h1>
+          <span>Gen 1 Research Glasses Sensor Dashboard</span>
+        </div>
+        <div class="status">
+          <span id="statusDot" class="dot"></span>
+          <span id="statusText" class="status-text">OFFLINE</span>
+        </div>
+        <div class="clock-wrap">
+          <div id="clock" class="value"></div>
+          <div id="lastSeen" class="subtle">Last data: --</div>
+          <div class="nav-actions">
+            <a class="nav-button" href="/game.html">Open Gesture Game</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="cameras">
+        <section id="panel-RGB" class="panel camera">
+          <div class="camera-label">RGB · CENTER</div>
+          <div class="canvas-wrap">
+            <canvas id="rgbCanvas" width="480" height="480"></canvas>
+            <div id="overlay-RGB" class="overlay">NO SIGNAL</div>
+          </div>
+          <div id="gazePanel" class="gaze-panel">
+            <div class="panel-title">GAZE DETECTION</div>
+            <div class="gaze-row">
+              <span class="gaze-label">LOOKING AT</span>
+              <span id="gazedLabel" class="gaze-value">--</span>
+            </div>
+            <div class="gaze-row">
+              <span class="gaze-label">CONFIDENCE</span>
+              <span id="gazedConf" class="gaze-value">--%</span>
+            </div>
+            <div class="gaze-row">
+              <span class="gaze-label">DWELL TIME</span>
+              <span id="gazeDwell" class="gaze-value">0.0s</span>
+            </div>
+            <div class="gaze-row">
+              <span class="gaze-label">OBJECTS IN SCENE</span>
+              <span id="sceneCount" class="gaze-value">0</span>
+            </div>
+            <div class="gaze-row">
+              <span class="gaze-label">HAND GESTURE</span>
+              <span id="handGesture" class="gaze-value">--</span>
+            </div>
+            <button id="calibrateBtn" class="calibrate-btn" type="button">Calibrate Gaze</button>
+            <div id="handList" class="scene-list"></div>
+            <div id="sceneList" class="scene-list"></div>
+          </div>
+        </section>
+        <section id="panel-SLAM_LEFT" class="panel camera">
+          <div class="camera-label">SLAM · LEFT · FISHEYE</div>
+          <div class="canvas-wrap">
+            <canvas id="slamLeftCanvas" width="320" height="240"></canvas>
+            <div id="overlay-SLAM_LEFT" class="overlay">NO SIGNAL</div>
+          </div>
+        </section>
+        <section id="panel-SLAM_RIGHT" class="panel camera">
+          <div class="camera-label">SLAM · RIGHT · FISHEYE</div>
+          <div class="canvas-wrap">
+            <canvas id="slamRightCanvas" width="320" height="240"></canvas>
+            <div id="overlay-SLAM_RIGHT" class="overlay">NO SIGNAL</div>
+          </div>
+        </section>
+      </div>
+
+      <div class="sensor-row">
+        <section class="panel et-panel">
+          <div class="panel-title">EYE TRACKING · IR</div>
+          <div class="metric-row"><span>Blinks</span><span id="blinkCount" class="value">0</span></div>
+          <div class="metric-row"><span>Average</span><span id="blinkAverage" class="value">0.0 / min</span></div>
+          <div class="metric-row"><span>State</span><span id="blinkState" class="value">OPEN</span></div>
+          <div class="metric-row"><span>L signal</span><span id="blinkLeftSignal" class="value">--</span></div>
+          <div class="metric-row"><span>R signal</span><span id="blinkRightSignal" class="value">--</span></div>
+          <div class="metric-row"><span>Thresholds</span><span id="blinkThresholds" class="value">--</span></div>
+          <div class="et-eyes">
+            <div class="canvas-wrap">
+              <canvas id="etLeftCanvas" width="160" height="120"></canvas>
+              <div id="overlay-ET_LEFT" class="overlay">NO SIGNAL</div>
+            </div>
+            <div class="canvas-wrap">
+              <canvas id="etRightCanvas" width="160" height="120"></canvas>
+              <div id="overlay-ET_RIGHT" class="overlay">NO SIGNAL</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel imu-panel">
+          <div class="panel-title">IMU</div>
+          <div class="imu-grid">
+            <div class="imu-card">
+              <div class="imu-header">
+                <span>IMU1</span>
+                <span id="imu0Count" class="subtle">0 samples</span>
+              </div>
+              <div class="bar-stack" id="imu0AccelBars"></div>
+              <div class="bar-stack" id="imu0GyroBars"></div>
+              <div class="metric-row"><span>|a|</span><span id="imu0Mag" class="value">--</span></div>
+              <canvas id="imu0Wave" class="wave" width="300" height="88"></canvas>
+            </div>
+            <div class="imu-card">
+              <div class="imu-header">
+                <span>IMU2</span>
+                <span id="imu1Count" class="subtle">0 samples</span>
+              </div>
+              <div class="bar-stack" id="imu1AccelBars"></div>
+              <div class="bar-stack" id="imu1GyroBars"></div>
+              <div class="metric-row"><span>|a|</span><span id="imu1Mag" class="value">--</span></div>
+              <canvas id="imu1Wave" class="wave" width="300" height="88"></canvas>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div class="env-grid">
+        <section class="panel metric-card">
+          <div class="panel-title">Barometer</div>
+          <div class="metric-row"><span>Pressure</span><span id="baroPressure" class="value large">--</span></div>
+          <div class="metric-row"><span>Altitude</span><span id="baroAltitude" class="value">--</span></div>
+          <div class="metric-row"><span>Temperature</span><span id="baroTemp" class="value">--</span></div>
+          <canvas id="baroWave" class="wave" width="300" height="88"></canvas>
+        </section>
+        <section class="panel metric-card">
+          <div class="panel-title">Audio</div>
+          <div class="metric-row"><span>Peak</span><span id="audioPeak" class="value large">--</span></div>
+          <div class="metric-row"><span>RMS</span><span id="audioRms" class="value">--</span></div>
+          <div class="audio-bars" id="audioBars"></div>
+          <canvas id="audioWave" class="wave" width="300" height="88"></canvas>
+        </section>
+      </div>
+
+      <div class="strip">
+        <div class="bottom-item"><span class="mini-label">Battery</span><span id="batteryValue" class="value">--</span></div>
+        <div class="bottom-item"><span class="mini-label">Thermal</span><span id="thermalValue" class="value">--</span></div>
+        <div class="bottom-item"><span class="mini-label">Connection</span><span id="connectionType" class="value">Wi-Fi</span></div>
+        <div class="bottom-item"><span class="mini-label">MPS</span><span id="mpsStatus" class="value">ACTIVE</span></div>
+      </div>
+    </div>
+
+    <aside class="panel sidebar">
+      <section class="metric-card compass">
+        <div class="panel-title">Magnetometer Compass</div>
+        <div class="compass-wrap">
+          <svg width="220" height="220" viewBox="0 0 200 200" aria-label="Compass">
+            <circle cx="100" cy="100" r="86" fill="#07131d" stroke="rgba(0,212,255,0.18)" stroke-width="2"></circle>
+            <circle cx="100" cy="100" r="6" fill="#00d4ff"></circle>
+            <text x="100" y="28" text-anchor="middle" fill="#7aa4b8" font-size="12">N</text>
+            <text x="172" y="104" text-anchor="middle" fill="#7aa4b8" font-size="12">E</text>
+            <text x="100" y="184" text-anchor="middle" fill="#7aa4b8" font-size="12">S</text>
+            <text x="28" y="104" text-anchor="middle" fill="#7aa4b8" font-size="12">W</text>
+            <g id="needle" class="needle">
+              <polygon points="100,28 108,100 100,92 92,100" fill="#00ff9d"></polygon>
+              <polygon points="100,172 108,100 100,108 92,100" fill="#ff4d6d" opacity="0.65"></polygon>
+            </g>
+          </svg>
+        </div>
+        <div class="metric-row"><span>Heading</span><span id="headingValue" class="value large">--</span></div>
+        <div class="metric-row"><span>Mx</span><span id="magX" class="value">--</span></div>
+        <div class="metric-row"><span>My</span><span id="magY" class="value">--</span></div>
+        <div class="metric-row"><span>Mz</span><span id="magZ" class="value">--</span></div>
+      </section>
+
+      <section class="metric-card telemetry">
+        <div class="panel-title">Telemetry</div>
+        <div class="telemetry-row"><span>Stream uptime</span><span id="uptimeValue">00:00:00</span></div>
+        <div class="telemetry-row"><span>RGB frames</span><span id="framesRgb">0</span></div>
+        <div class="telemetry-row"><span>SLAM L frames</span><span id="framesSlamL">0</span></div>
+        <div class="telemetry-row"><span>SLAM R frames</span><span id="framesSlamR">0</span></div>
+        <div class="telemetry-row"><span>ET frames</span><span id="framesEt">0</span></div>
+        <div class="telemetry-row"><span>Blinks</span><span id="telemetryBlinks">0</span></div>
+        <div class="telemetry-row"><span>Avg blinks/min</span><span id="telemetryBlinkRate">0.0</span></div>
+        <div class="telemetry-row"><span>IMU samples</span><span id="imuSamples">0</span></div>
+        <div class="telemetry-row"><span>Data rate</span><span id="dataRate">0.0 KB/s</span></div>
+      </section>
+    </aside>
+  </div>
+  <div id="calibrationDot" class="calibration-dot"></div>
+
+  <script>
+    const cameraMap = {
+      RGB: "rgbCanvas",
+      SLAM_LEFT: "slamLeftCanvas",
+      SLAM_RIGHT: "slamRightCanvas",
+      ET_LEFT: "etLeftCanvas",
+      ET_RIGHT: "etRightCanvas"
+    };
+
+    const frameCounterMap = {
+      RGB: "framesRgb",
+      SLAM_LEFT: "framesSlamL",
+      SLAM_RIGHT: "framesSlamR"
+    };
+
+    const state = {
+      connected: false,
+      startedAt: Date.now(),
+      lastDataAt: 0,
+      totalBytes: 0,
+      dataEvents: [],
+      frameCounts: { RGB: 0, SLAM_LEFT: 0, SLAM_RIGHT: 0, ET_LEFT: 0, ET_RIGHT: 0 },
+      imuCounts: [0, 0],
+      blinkCount: 0,
+      latestDetection: null
+    };
+
+    const signalTimeouts = {};
+
+    function createRingBuffer(size) {
+      return { data: new Float32Array(size), size, index: 0, length: 0 };
+    }
+
+    function pushRing(buffer, value) {
+      buffer.data[buffer.index] = value;
+      buffer.index = (buffer.index + 1) % buffer.size;
+      if (buffer.length < buffer.size) buffer.length += 1;
+    }
+
+    function drawRing(canvasId, buffer, stroke, minValue, maxValue) {
+      const canvas = document.getElementById(canvasId);
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const span = Math.max(maxValue - minValue, 1e-6);
+      for (let i = 0; i < buffer.length; i++) {
+        const idx = (buffer.index - buffer.length + i + buffer.size) % buffer.size;
+        const value = buffer.data[idx];
+        const x = buffer.length === 1 ? 0 : (i / (buffer.size - 1)) * canvas.width;
+        const normalized = (value - minValue) / span;
+        const y = canvas.height - normalized * canvas.height;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    function buildAxisBars(rootId, unit, decimals) {
+      const root = document.getElementById(rootId);
+      ["X", "Y", "Z"].forEach((axis, index) => {
+        const row = document.createElement("div");
+        row.className = "bar-row";
+
+        const label = document.createElement("span");
+        label.textContent = axis;
+
+        const track = document.createElement("div");
+        track.className = "bar-track";
+
+        const fill = document.createElement("div");
+        fill.className = `bar-fill ${index === 0 ? "x" : index === 1 ? "y" : "z"}`;
+        fill.id = `${rootId}-${axis}`;
+        track.appendChild(fill);
+
+        const value = document.createElement("span");
+        value.id = `${rootId}-${axis}-value`;
+        value.textContent = `0.${"0".repeat(decimals)} ${unit}`;
+
+        row.append(label, track, value);
+        root.appendChild(row);
+      });
+    }
+
+    buildAxisBars("imu0AccelBars", "m/s²", 3);
+    buildAxisBars("imu0GyroBars", "rad/s", 4);
+    buildAxisBars("imu1AccelBars", "m/s²", 3);
+    buildAxisBars("imu1GyroBars", "rad/s", 4);
+
+    const audioBars = document.getElementById("audioBars");
+    for (let i = 0; i < 7; i++) {
+      const col = document.createElement("div");
+      col.className = "audio-col";
+      const meter = document.createElement("div");
+      meter.className = "audio-meter";
+      const fill = document.createElement("div");
+      fill.className = "audio-fill";
+      fill.id = `audioFill${i}`;
+      meter.appendChild(fill);
+      const label = document.createElement("span");
+      label.textContent = `CH${i + 1}`;
+      col.append(meter, label);
+      audioBars.appendChild(col);
+    }
+
+    const imuBuffers = [createRingBuffer(300), createRingBuffer(300)];
+    const baroBuffer = createRingBuffer(300);
+    const audioBuffer = createRingBuffer(300);
+
+    function setText(id, text) {
+      document.getElementById(id).textContent = text;
+    }
+
+    function formatTimestamp(ts) {
+      return new Date(ts).toLocaleTimeString();
+    }
+
+    function setStatus(isLive) {
+      state.connected = isLive;
+      const dot = document.getElementById("statusDot");
+      const text = document.getElementById("statusText");
+      dot.classList.toggle("live", isLive);
+      text.textContent = isLive ? "LIVE" : "OFFLINE";
+      setText("mpsStatus", isLive ? "ACTIVE" : "WAITING");
+    }
+
+    function updateClock() {
+      const now = new Date();
+      setText("clock", now.toLocaleTimeString());
+      const uptimeMs = now.getTime() - state.startedAt;
+      const totalSeconds = Math.floor(uptimeMs / 1000);
+      const hh = String(Math.floor(totalSeconds / 3600)).padStart(2, "0");
+      const mm = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, "0");
+      const ss = String(totalSeconds % 60).padStart(2, "0");
+      setText("uptimeValue", `${hh}:${mm}:${ss}`);
+    }
+
+    function touchData(messageSize) {
+      const now = Date.now();
+      state.lastDataAt = now;
+      state.totalBytes += messageSize;
+      state.dataEvents.push({ t: now, bytes: messageSize });
+      while (state.dataEvents.length && now - state.dataEvents[0].t > 1000) {
+        state.dataEvents.shift();
+      }
+      const bytesPerSecond = state.dataEvents.reduce((sum, event) => sum + event.bytes, 0);
+      setText("dataRate", `${(bytesPerSecond / 1024).toFixed(1)} KB/s`);
+      setText("lastSeen", `Last data: ${formatTimestamp(now)}`);
+    }
+
+    function markSignal(sensor, active) {
+      const panel = document.getElementById(`panel-${sensor}`);
+      const overlay = document.getElementById(`overlay-${sensor}`);
+      if (panel) panel.classList.toggle("active", active);
+      if (overlay) overlay.style.display = active ? "none" : "flex";
+    }
+
+    function armNoSignal(sensor) {
+      markSignal(sensor, true);
+      clearTimeout(signalTimeouts[sensor]);
+      signalTimeouts[sensor] = setTimeout(() => markSignal(sensor, false), 2000);
+    }
+
+    async function drawFrame(canvasId, b64data) {
+      const resp = await fetch("data:image/jpeg;base64," + b64data);
+      const blob = await resp.blob();
+      const bitmap = await createImageBitmap(blob);
+      const ctx = document.getElementById(canvasId).getContext("2d");
+      ctx.drawImage(bitmap, 0, 0);
+      bitmap.close();
+    }
+
+    function updateBar(rootId, axis, value, maxAbs, decimals, unit) {
+      const ratio = Math.min(Math.abs(value) / maxAbs, 1);
+      document.getElementById(`${rootId}-${axis}`).style.transform = `scaleX(${ratio})`;
+      setText(`${rootId}-${axis}-value`, `${value.toFixed(decimals)} ${unit}`);
+    }
+
+    function drawDetectionOverlay(msg) {
+      const canvas = document.getElementById("rgbCanvas");
+      const ctx = canvas.getContext("2d");
+      const sx = canvas.width / msg.frame_w;
+      const sy = canvas.height / msg.frame_h;
+      const gx = msg.gaze_x * sx;
+      const gy = msg.gaze_y * sy;
+
+      if (msg.all_detections) {
+        msg.all_detections.forEach((det) => {
+          const [x1, y1, x2, y2] = det.box;
+          ctx.strokeStyle = "rgba(0, 212, 255, 0.3)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
+          ctx.fillStyle = "rgba(0, 212, 255, 0.5)";
+          ctx.font = "11px monospace";
+          ctx.fillText(det.label, x1 * sx + 4, y1 * sy + 14);
+        });
+      }
+
+      if (msg.hand_gestures) {
+        msg.hand_gestures.forEach((hand) => {
+          const [x1, y1, x2, y2] = hand.box;
+          ctx.strokeStyle = "rgba(255, 213, 74, 0.9)";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
+          ctx.fillStyle = "#ffd54a";
+          ctx.font = "bold 12px monospace";
+          ctx.fillText(hand.gesture.replace("_", " ").toUpperCase(), x1 * sx + 4, Math.max(14, y1 * sy - 6));
+        });
+      }
+
+      if (msg.gazed_object) {
+        const [x1, y1, x2, y2] = msg.gazed_object.box;
+        ctx.strokeStyle = "#00ff9d";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x1 * sx, y1 * sy, (x2 - x1) * sx, (y2 - y1) * sy);
+        ctx.fillStyle = "#00ff9d";
+        ctx.font = "bold 13px monospace";
+        ctx.fillText(
+          `${msg.gazed_object.label.toUpperCase()} ${(msg.gazed_object.conf * 100).toFixed(0)}%`,
+          x1 * sx + 4,
+          Math.max(14, y1 * sy - 6)
+        );
+      }
+
+      ctx.strokeStyle = msg.gazed_object ? "#00ff9d" : "#ffffff";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(gx, gy, 18, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(gx - 24, gy);
+      ctx.lineTo(gx + 24, gy);
+      ctx.moveTo(gx, gy - 24);
+      ctx.lineTo(gx, gy + 24);
+      ctx.stroke();
+    }
+
+    function handleImage(msg) {
+      const canvasId = cameraMap[msg.sensor];
+      if (!canvasId) return;
+      armNoSignal(msg.sensor);
+      state.frameCounts[msg.sensor] = (state.frameCounts[msg.sensor] || 0) + 1;
+      if (frameCounterMap[msg.sensor]) {
+        setText(frameCounterMap[msg.sensor], String(state.frameCounts[msg.sensor]));
+      }
+      if (msg.sensor === "ET_LEFT" || msg.sensor === "ET_RIGHT") {
+        setText("framesEt", String(state.frameCounts.ET_LEFT + state.frameCounts.ET_RIGHT));
+      }
+      drawFrame(canvasId, msg.data).then(() => {
+        if (msg.sensor === "RGB" && state.latestDetection) {
+          drawDetectionOverlay(state.latestDetection);
+        }
+      }).catch(() => {});
+    }
+
+    function handleImu(msg) {
+      const idx = msg.idx === 1 ? 1 : 0;
+      state.imuCounts[idx] += 1;
+      setText(`imu${idx}Count`, `${state.imuCounts[idx]} samples`);
+      setText("imuSamples", String(state.imuCounts[0] + state.imuCounts[1]));
+
+      updateBar(`imu${idx}AccelBars`, "X", msg.ax, 20, 3, "m/s²");
+      updateBar(`imu${idx}AccelBars`, "Y", msg.ay, 20, 3, "m/s²");
+      updateBar(`imu${idx}AccelBars`, "Z", msg.az, 20, 3, "m/s²");
+      updateBar(`imu${idx}GyroBars`, "X", msg.gx, 10, 4, "rad/s");
+      updateBar(`imu${idx}GyroBars`, "Y", msg.gy, 10, 4, "rad/s");
+      updateBar(`imu${idx}GyroBars`, "Z", msg.gz, 10, 4, "rad/s");
+
+      const mag = Math.sqrt(msg.ax * msg.ax + msg.ay * msg.ay + msg.az * msg.az);
+      setText(`imu${idx}Mag`, `${mag.toFixed(3)} m/s²`);
+      pushRing(imuBuffers[idx], mag);
+      drawRing(`imu${idx}Wave`, imuBuffers[idx], "#00d4ff", 0, 20);
+    }
+
+    function handleBaro(msg) {
+      setText("baroPressure", `${msg.hpa.toFixed(2)} hPa`);
+      setText("baroAltitude", `${msg.alt.toFixed(1)} m`);
+      setText("baroTemp", `${msg.temp.toFixed(1)} °C`);
+      pushRing(baroBuffer, msg.hpa);
+      drawRing("baroWave", baroBuffer, "#00ff9d", 980, 1040);
+      setText("thermalValue", `${msg.temp.toFixed(1)} °C`);
+    }
+
+    function handleMag(msg) {
+      setText("headingValue", `${msg.heading.toFixed(1)}°`);
+      setText("magX", `${msg.mx.toFixed(2)} µT`);
+      setText("magY", `${msg.my.toFixed(2)} µT`);
+      setText("magZ", `${msg.mz.toFixed(2)} µT`);
+      document.getElementById("needle").style.transform = `rotate(${msg.heading}deg)`;
+    }
+
+    function handleAudio(msg) {
+      const rmsAverage = msg.rms.reduce((sum, value) => sum + value, 0) / msg.rms.length;
+      setText("audioPeak", `${msg.peak_db.toFixed(1)} dBFS`);
+      setText("audioRms", `${rmsAverage.toFixed(4)} RMS`);
+      msg.rms.forEach((value, index) => {
+        const height = Math.max(0, Math.min(value * 500, 100));
+        document.getElementById(`audioFill${index}`).style.height = `${height}%`;
+      });
+      pushRing(audioBuffer, msg.peak_db);
+      drawRing("audioWave", audioBuffer, "#00d4ff", -90, 0);
+    }
+
+    function handleBlink(msg) {
+      state.blinkCount = msg.count;
+      setText("blinkCount", String(msg.count));
+      setText("blinkAverage", `${msg.avg_per_min.toFixed(1)} / min`);
+      setText("blinkState", msg.closed ? "CLOSED" : "OPEN");
+      setText("blinkLeftSignal", `${msg.left_ratio.toFixed(2)} / ${msg.left_dark_ratio.toFixed(2)}`);
+      setText("blinkRightSignal", `${msg.right_ratio.toFixed(2)} / ${msg.right_dark_ratio.toFixed(2)}`);
+      setText("blinkThresholds", `${msg.closed_threshold.toFixed(2)} / ${msg.open_threshold.toFixed(2)}`);
+      setText("telemetryBlinks", String(msg.count));
+      setText("telemetryBlinkRate", msg.avg_per_min.toFixed(1));
+    }
+
+    function renderSceneList(detections) {
+      const sceneList = document.getElementById("sceneList");
+      sceneList.replaceChildren();
+      detections
+        .slice()
+        .sort((a, b) => b.conf - a.conf)
+        .forEach((det) => {
+          const item = document.createElement("div");
+          item.className = "scene-item";
+          const left = document.createElement("span");
+          left.textContent = det.label;
+          const right = document.createElement("span");
+          right.textContent = `${(det.conf * 100).toFixed(0)}%`;
+          item.append(left, right);
+          sceneList.appendChild(item);
+        });
+    }
+
+    function renderHandList(hands, available) {
+      const handList = document.getElementById("handList");
+      handList.replaceChildren();
+      if (!available) {
+        setText("handGesture", "UNAVAILABLE");
+        return;
+      }
+      if (!hands || hands.length === 0) {
+        setText("handGesture", "--");
+        return;
+      }
+      setText("handGesture", hands[0].gesture.replace("_", " ").toUpperCase());
+      hands.forEach((hand) => {
+        const item = document.createElement("div");
+        item.className = "scene-item";
+        const left = document.createElement("span");
+        left.textContent = `${hand.handedness} ${hand.gesture.replace("_", " ")}`;
+        const right = document.createElement("span");
+        right.textContent = `${(hand.conf * 100).toFixed(0)}%`;
+        item.append(left, right);
+        handList.appendChild(item);
+      });
+    }
+
+    function handleDetection(msg) {
+      state.latestDetection = msg;
+      if (msg.gazed_object) {
+        setText("gazedLabel", msg.gazed_object.label.toUpperCase());
+        document.getElementById("gazedLabel").style.color = "#00ff9d";
+        setText("gazedConf", `${(msg.gazed_object.conf * 100).toFixed(0)}%`);
+      } else {
+        setText("gazedLabel", "--");
+        document.getElementById("gazedLabel").style.color = "#4a7a94";
+        setText("gazedConf", "--%");
+      }
+      setText("gazeDwell", `${msg.dwell_seconds.toFixed(1)}s`);
+      setText("sceneCount", String(msg.all_detections ? msg.all_detections.length : 0));
+      renderSceneList(msg.all_detections || []);
+      renderHandList(msg.hand_gestures || [], Boolean(msg.hand_detector_available));
+      drawDetectionOverlay(msg);
+    }
+
+    function sendWsMessage(payload) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(payload));
+      }
+    }
+
+    const calibrationPoints = [
+      { x: 0.5, y: 0.5 },
+      { x: 0.15, y: 0.2 },
+      { x: 0.85, y: 0.2 },
+      { x: 0.2, y: 0.82 },
+      { x: 0.8, y: 0.82 }
+    ];
+
+    async function runCalibration() {
+      const dot = document.getElementById("calibrationDot");
+      sendWsMessage({ type: "calibration_control", action: "start" });
+      for (const point of calibrationPoints) {
+        dot.style.display = "block";
+        dot.style.left = `${point.x * window.innerWidth}px`;
+        dot.style.top = `${point.y * window.innerHeight}px`;
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        sendWsMessage({
+          type: "calibration_control",
+          action: "capture_point",
+          x_norm: point.x,
+          y_norm: point.y
+        });
+        await new Promise((resolve) => setTimeout(resolve, 1700));
+      }
+      dot.style.display = "none";
+      sendWsMessage({ type: "calibration_control", action: "finish" });
+    }
+
+    document.getElementById("calibrateBtn").addEventListener("click", () => {
+      runCalibration().catch(() => {});
+    });
+
+    let ws;
+    function connect() {
+      ws = new WebSocket("ws://localhost:8765");
+      ws.onopen = () => setStatus(true);
+      ws.onclose = () => {
+        setStatus(false);
+        setTimeout(connect, 2000);
+      };
+      ws.onmessage = (e) => {
+        touchData(e.data.length);
+        const msg = JSON.parse(e.data);
+        requestAnimationFrame(() => {
+          switch (msg.type) {
+            case "status":
+              setStatus(Boolean(msg.connected));
+              break;
+            case "image":
+              handleImage(msg);
+              break;
+            case "imu":
+              handleImu(msg);
+              break;
+            case "baro":
+              handleBaro(msg);
+              break;
+            case "blink":
+              handleBlink(msg);
+              break;
+            case "detection":
+              handleDetection(msg);
+              break;
+            case "mag":
+              handleMag(msg);
+              break;
+            case "audio":
+              handleAudio(msg);
+              break;
+          }
+        });
+      };
+    }
+
+    updateClock();
+    setInterval(updateClock, 1000);
+    connect();
+  </script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+aria-venv/
+__pycache__/
+*.pyc
+*.vrs
+*.pt
+emnist_data/
+healthcheck_out/
+sessions/
+results/
+.env
+.DS_Store

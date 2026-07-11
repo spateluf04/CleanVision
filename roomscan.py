@@ -8,6 +8,12 @@ estimates energy use from the config catalog, and writes:
     <out>/crops/<class>_<i>.jpg    best-confidence crop per counted instance
     <out>/roomscan_report.html     self-contained browser report page
 
+Also registers the session (room name, timestamp, totals, recommendations,
+report paths) in the shared cross-scan index at
+<ROOMSCAN_OUTPUT_DIR>/roomscan_sessions.json via energy_sessions.py, so
+past scans can be listed/reviewed/compared without re-parsing every
+session's report -- see energy_sessions.py / roomscan_dashboard.py.
+
 Requires ultralytics (+ torch) and, for --vrs, projectaria_tools; --live
 additionally needs the Aria Client SDK (Mac). The --live path is a thin
 pass-through to AriaCapture's live backend and is exercised on the Mac.
@@ -21,7 +27,7 @@ import json
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -41,7 +47,9 @@ from config import (
 )
 from energy_detector import ApplianceScanAggregator, EnergyDetector, scan_capture_rgb
 from energy_estimator import estimate_room
+from energy_recommendations import generate_recommendations
 from energy_report import render_html
+from energy_sessions import register_session
 from logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -81,29 +89,80 @@ def save_crops(crops_by_class: Dict[str, List[np.ndarray]], crop_dir: Path) -> D
     return rel_paths
 
 
+def merge_device_estimate_fields(
+    estimate_devices: List[Dict[str, object]],
+    confidences: Dict[str, List[float]],
+    crop_paths: Optional[Dict[str, List[str]]] = None,
+) -> None:
+    """Mutate estimate_room()'s device dicts in place with confidences/crops.
+
+    Shared by the batch report (crop_paths populated from save_crops) and the
+    live dashboard snapshot (crop_paths=None -- crops are only saved once, at
+    session end, so every device gets an empty crop list mid-scan).
+    """
+    for device in estimate_devices:
+        name = device["class_name"]
+        device["confidences"] = confidences.get(name, [])
+        device["crops"] = (crop_paths or {}).get(name, [])
+
+
 def build_report(
-    args: argparse.Namespace,
+    room_name: str,
+    source: str,
     aggregator: ApplianceScanAggregator,
     crop_paths: Dict[str, List[str]],
     scan_wall_seconds: float,
 ) -> Dict[str, object]:
     estimate = estimate_room(aggregator.counts())
-    confidences = aggregator.best_confidences()
-    for device in estimate["devices"]:
-        name = device["class_name"]
-        device["crops"] = crop_paths.get(name, [])
-        device["confidences"] = confidences.get(name, [])
+    merge_device_estimate_fields(estimate["devices"], aggregator.best_confidences(), crop_paths)
     return {
         "scan": {
-            "room_name": args.room_name,
-            "source": "live" if args.live else str(args.vrs),
+            "room_name": room_name,
+            "source": source,
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             "frames_sampled": aggregator.frames_observed,
             "scan_wall_seconds": round(scan_wall_seconds, 1),
         },
         "devices": estimate["devices"],
         "totals": estimate["totals"],
+        # No live frame at report-build time, so context-dependent rules
+        # (e.g. "TV in a bright room") simply don't fire here -- only the
+        # device/co-occurrence and threshold rules apply to a finished scan.
+        "recommendations": generate_recommendations(estimate["devices"], estimate["totals"]),
     }
+
+
+def finalize_scan(
+    room_name: str,
+    source: str,
+    aggregator: ApplianceScanAggregator,
+    scan_wall_seconds: float,
+    out_dir: Path,
+) -> Dict[str, object]:
+    """Build the report, write JSON/HTML artifacts, and register the session.
+
+    Shared by this module's CLI main() and roomscan_live.py's
+    LiveScanController.finish() so a batch scan and a live-dashboard scan
+    write byte-identical artifacts from the same aggregator state.
+    """
+    out_dir = Path(out_dir).expanduser()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    crop_paths = save_crops(aggregator.best_crops(), out_dir / ROOMSCAN_CROP_DIR_NAME)
+    report = build_report(room_name, source, aggregator, crop_paths, scan_wall_seconds)
+
+    json_path = out_dir / ROOMSCAN_REPORT_JSON_NAME
+    try:
+        json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Failed to write report JSON {json_path}") from exc
+    logger.info("Wrote %s", json_path)
+
+    html_path = out_dir / ROOMSCAN_REPORT_HTML_NAME
+    render_html(report, out_dir, html_path)
+    logger.info("Wrote %s", html_path)
+
+    register_session(report, out_dir)
+    return report
 
 
 def print_summary(report: Dict[str, object]) -> None:
@@ -150,23 +209,11 @@ def main() -> None:
     scan_wall_seconds = time.monotonic() - wall_start
 
     out_dir = Path(args.out).expanduser()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    crop_paths = save_crops(aggregator.best_crops(), out_dir / ROOMSCAN_CROP_DIR_NAME)
-    report = build_report(args, aggregator, crop_paths, scan_wall_seconds)
-
-    json_path = out_dir / ROOMSCAN_REPORT_JSON_NAME
-    try:
-        json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    except OSError as exc:
-        raise RuntimeError(f"Failed to write report JSON {json_path}") from exc
-    logger.info("Wrote %s", json_path)
-
-    html_path = out_dir / ROOMSCAN_REPORT_HTML_NAME
-    render_html(report, out_dir, html_path)
-    logger.info("Wrote %s", html_path)
+    source = "live" if args.live else str(args.vrs)
+    report = finalize_scan(args.room_name, source, aggregator, scan_wall_seconds, out_dir)
 
     print_summary(report)
-    print(f"\nReport page: {html_path}")
+    print(f"\nReport page: {out_dir / ROOMSCAN_REPORT_HTML_NAME}")
     sys.exit(0 if report["devices"] else 2)
 
 

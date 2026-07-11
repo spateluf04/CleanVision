@@ -41,6 +41,10 @@ h1 { font-size: 1.9rem; margin-bottom: 4px; }
 .row { display: flex; justify-content: space-between; font-size: 0.9rem; padding: 3px 0; color: #b7bfcd; }
 .row b { color: #e6e9ef; font-weight: 600; }
 .noimg { height: 170px; display: flex; align-items: center; justify-content: center; color: #4a5265; background: #0b0e13; }
+.recs { margin: 28px 0; }
+.recs h2 { font-size: 1.2rem; margin-bottom: 12px; }
+.recs ul { list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.recs li { background: #171c26; border: 1px solid #232a38; border-left: 3px solid #5dd0a0; border-radius: 8px; padding: 12px 16px; font-size: 0.92rem; color: #dbe1ea; }
 footer { margin-top: 36px; color: #5a6375; font-size: 0.8rem; }
 """
 
@@ -77,6 +81,14 @@ def _device_card(device: Dict[str, object], out_dir: Path) -> str:
   </div>"""
 
 
+def _recommendations_block(report: Dict[str, object]) -> str:
+    items = report.get("recommendations", [])
+    if not items:
+        return ""
+    lis = "".join(f"<li>{html.escape(str(s))}</li>" for s in items)
+    return f'<div class="recs"><h2>Recommended Actions</h2><ul>{lis}</ul></div>'
+
+
 def render_html(report: Dict[str, object], out_dir: Path, html_path: Path) -> None:
     """Write the self-contained report page for one roomscan report dict."""
     scan = report["scan"]
@@ -100,6 +112,7 @@ def render_html(report: Dict[str, object], out_dir: Path, html_path: Path) -> No
 </div>
 <div class="grid">{cards}
 </div>
+{_recommendations_block(report)}
 <footer>Estimates use typical-draw priors per appliance class, not measured consumption. Captured with Meta Project Aria Gen 1.</footer>
 </div></body></html>"""
     try:

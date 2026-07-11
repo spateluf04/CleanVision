@@ -18,17 +18,24 @@ Standalone test CLI:
 """
 
 import argparse
+import threading
 import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from config import (
     ENERGY_CATALOG,
     ENERGY_DETECT_CONFIDENCE,
+    ENERGY_DUPLICATE_BOX_IOU_THRESHOLD,
     ENERGY_FRAME_SAMPLE_HZ,
     ENERGY_MIN_BOX_AREA_FRAC,
+    ENERGY_STABILIZE_IOU_MATCH_THRESHOLD,
+    ENERGY_STABILIZE_MAX_MISS_SECONDS,
+    ENERGY_STABILIZE_MIN_HITS,
+    ENERGY_STABILIZE_WINDOW_SECONDS,
     ENERGY_YOLO_WEIGHTS,
 )
 from logging_utils import get_logger
@@ -45,6 +52,46 @@ class Detection:
     class_name: str
     confidence: float
     box_xyxy: Tuple[int, int, int, int]
+
+
+def _iou(box_a: Tuple[int, int, int, int], box_b: Tuple[int, int, int, int]) -> float:
+    """Intersection-over-union of two xyxy boxes."""
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if intersection <= 0:
+        return 0.0
+    area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def _suppress_duplicate_boxes(
+    detections: List[Detection], iou_threshold: float = ENERGY_DUPLICATE_BOX_IOU_THRESHOLD
+) -> List[Detection]:
+    """Collapse same-class boxes that overlap heavily into a single detection.
+
+    YOLO occasionally fires two overlapping boxes on one physical object in a
+    single frame; left alone this would inflate the per-frame count and,
+    downstream, ApplianceScanAggregator's max-simultaneous count. Classic
+    greedy NMS per class, keeping the highest-confidence box of each cluster.
+    """
+    by_class: Dict[str, List[Detection]] = {}
+    for det in detections:
+        by_class.setdefault(det.class_name, []).append(det)
+
+    kept: List[Detection] = []
+    for class_dets in by_class.values():
+        class_dets.sort(key=lambda d: d.confidence, reverse=True)
+        class_kept: List[Detection] = []
+        for det in class_dets:
+            if all(_iou(det.box_xyxy, k.box_xyxy) < iou_threshold for k in class_kept):
+                class_kept.append(det)
+        kept.extend(class_kept)
+    return kept
 
 
 @dataclass
@@ -64,40 +111,50 @@ class ApplianceScanAggregator:
     def __init__(self) -> None:
         self.frames_observed = 0
         self._slots: Dict[str, List[_CropSlot]] = {}
+        # Live mode calls observe_frame() from AriaCapture's dispatcher thread
+        # while counts()/best_crops()/best_confidences() are read from the Qt
+        # main thread (or a ticker thread) via LiveScanController.snapshot() --
+        # without this lock, a new class key inserted mid-iteration raises
+        # "dictionary changed size during iteration".
+        self._lock = threading.Lock()
 
     def observe_frame(self, detections: List[Detection], frame_rgb: Optional[np.ndarray]) -> None:
         """Fold one frame's detections in. ``frame_rgb`` may be None in tests
         (crops are then skipped, counts still update)."""
-        self.frames_observed += 1
         by_class: Dict[str, List[Detection]] = {}
         for det in detections:
             by_class.setdefault(det.class_name, []).append(det)
 
-        for class_name, dets in by_class.items():
-            dets.sort(key=lambda d: d.confidence, reverse=True)
-            slots = self._slots.setdefault(class_name, [])
-            # Grow to the new simultaneous max; never shrink.
-            while len(slots) < len(dets):
-                slots.append(_CropSlot(confidence=-1.0, crop_rgb=None))  # type: ignore[arg-type]
-            for i, det in enumerate(dets):
-                if det.confidence > slots[i].confidence:
-                    slots[i].confidence = det.confidence
-                    if frame_rgb is not None:
-                        slots[i].crop_rgb = _extract_crop(frame_rgb, det.box_xyxy)
+        with self._lock:
+            self.frames_observed += 1
+            for class_name, dets in by_class.items():
+                dets.sort(key=lambda d: d.confidence, reverse=True)
+                slots = self._slots.setdefault(class_name, [])
+                # Grow to the new simultaneous max; never shrink.
+                while len(slots) < len(dets):
+                    slots.append(_CropSlot(confidence=-1.0, crop_rgb=None))  # type: ignore[arg-type]
+                for i, det in enumerate(dets):
+                    if det.confidence > slots[i].confidence:
+                        slots[i].confidence = det.confidence
+                        if frame_rgb is not None:
+                            slots[i].crop_rgb = _extract_crop(frame_rgb, det.box_xyxy)
 
     def counts(self) -> Dict[str, int]:
         """{class_name: max simultaneous detections seen in one frame}."""
-        return {name: len(slots) for name, slots in self._slots.items() if slots}
+        with self._lock:
+            return {name: len(slots) for name, slots in self._slots.items() if slots}
 
     def best_crops(self) -> Dict[str, List[np.ndarray]]:
         """Per class, one best-confidence RGB crop per counted instance slot."""
-        return {
-            name: [s.crop_rgb for s in slots if s.crop_rgb is not None]
-            for name, slots in self._slots.items()
-        }
+        with self._lock:
+            return {
+                name: [s.crop_rgb for s in slots if s.crop_rgb is not None]
+                for name, slots in self._slots.items()
+            }
 
     def best_confidences(self) -> Dict[str, List[float]]:
-        return {name: [round(s.confidence, 3) for s in slots] for name, slots in self._slots.items()}
+        with self._lock:
+            return {name: [round(s.confidence, 3) for s in slots] for name, slots in self._slots.items()}
 
 
 def _extract_crop(frame_rgb: np.ndarray, box_xyxy: Tuple[int, int, int, int]) -> np.ndarray:
@@ -156,7 +213,189 @@ class EnergyDetector:
             detections.append(
                 Detection(class_name=class_name, confidence=float(box.conf[0]), box_xyxy=(x1, y1, x2, y2))
             )
-        return detections
+        return _suppress_duplicate_boxes(detections)
+
+
+@dataclass
+class _Track:
+    box_xyxy: Tuple[int, int, int, int]
+    confidence: float
+    hit_timestamps_ns: Deque[int]
+    last_seen_ns: int
+
+
+class DetectionStabilizer:
+    """Temporal smoothing layer between EnergyDetector.detect() and ApplianceScanAggregator.
+
+    Raw per-frame YOLO detections flicker: a real, stationary appliance can
+    drop out for a frame (motion blur, angle, confidence dip) or a spurious
+    box can appear for a single frame. Neither should reach the aggregator
+    as-is -- a dropout would look like the object left, and a spurious box
+    would permanently inflate ApplianceScanAggregator's max-simultaneous
+    count. This class buffers a rolling window of per-class, per-track hit
+    timestamps (device time) and only reports a track once it has been seen
+    ``min_hits`` times inside ``window_seconds``, keeping it alive for
+    ``max_miss_seconds`` after its last hit before dropping it.
+
+    Tracks are matched frame-to-frame within a class by IOU (greedy, highest
+    IOU above ``iou_match_threshold`` wins) -- a lightweight stand-in for a
+    full SORT/Kalman tracker, sufficient because RoomScan's targets are
+    largely stationary appliances rather than fast-moving objects.
+    """
+
+    def __init__(
+        self,
+        window_seconds: float = ENERGY_STABILIZE_WINDOW_SECONDS,
+        min_hits: int = ENERGY_STABILIZE_MIN_HITS,
+        max_miss_seconds: float = ENERGY_STABILIZE_MAX_MISS_SECONDS,
+        iou_match_threshold: float = ENERGY_STABILIZE_IOU_MATCH_THRESHOLD,
+    ) -> None:
+        self._window_ns = int(window_seconds * 1e9)
+        self._min_hits = min_hits
+        self._max_miss_ns = int(max_miss_seconds * 1e9)
+        self._iou_match_threshold = iou_match_threshold
+        self._tracks: Dict[str, List[_Track]] = {}
+        self._instantaneous_counts: Dict[str, int] = {}
+        # Same cross-thread hazard as ApplianceScanAggregator: update() runs on
+        # AriaCapture's dispatcher thread, stabilized_counts()/
+        # instantaneous_counts() are read from the Qt main/ticker thread.
+        self._lock = threading.Lock()
+
+    def update(self, detections: List[Detection], timestamp_ns: int) -> List[Detection]:
+        """Feed one frame's raw detections; return the stabilized detections for that frame.
+
+        The returned list has one representative Detection per confirmed
+        (min_hits reached, not yet timed out) track, ready to hand straight
+        to ApplianceScanAggregator.observe_frame().
+        """
+        instantaneous_counts: Dict[str, int] = {}
+        for det in detections:
+            instantaneous_counts[det.class_name] = instantaneous_counts.get(det.class_name, 0) + 1
+
+        by_class: Dict[str, List[Detection]] = {}
+        for det in detections:
+            by_class.setdefault(det.class_name, []).append(det)
+
+        with self._lock:
+            self._instantaneous_counts = instantaneous_counts
+            stabilized: List[Detection] = []
+            for class_name in set(self._tracks) | set(by_class):
+                tracks = self._tracks.get(class_name, [])
+                unmatched_tracks = list(tracks)
+
+                for det in by_class.get(class_name, []):
+                    best_track, best_iou = None, self._iou_match_threshold
+                    for track in unmatched_tracks:
+                        iou = _iou(det.box_xyxy, track.box_xyxy)
+                        if iou >= best_iou:
+                            best_track, best_iou = track, iou
+                    if best_track is not None:
+                        best_track.box_xyxy = det.box_xyxy
+                        best_track.confidence = det.confidence
+                        best_track.hit_timestamps_ns.append(timestamp_ns)
+                        best_track.last_seen_ns = timestamp_ns
+                        unmatched_tracks.remove(best_track)
+                    else:
+                        tracks.append(
+                            _Track(
+                                box_xyxy=det.box_xyxy,
+                                confidence=det.confidence,
+                                hit_timestamps_ns=deque([timestamp_ns]),
+                                last_seen_ns=timestamp_ns,
+                            )
+                        )
+
+                surviving: List[_Track] = []
+                for track in tracks:
+                    while track.hit_timestamps_ns and timestamp_ns - track.hit_timestamps_ns[0] > self._window_ns:
+                        track.hit_timestamps_ns.popleft()
+                    if timestamp_ns - track.last_seen_ns > self._max_miss_ns:
+                        continue
+                    surviving.append(track)
+                    if len(track.hit_timestamps_ns) >= self._min_hits:
+                        stabilized.append(
+                            Detection(class_name=class_name, confidence=track.confidence, box_xyxy=track.box_xyxy)
+                        )
+
+                if surviving:
+                    self._tracks[class_name] = surviving
+                else:
+                    self._tracks.pop(class_name, None)
+
+            return stabilized
+
+    def instantaneous_counts(self) -> Dict[str, int]:
+        """Raw, unfiltered per-class counts from the most recently observed frame."""
+        with self._lock:
+            return dict(self._instantaneous_counts)
+
+    def stabilized_counts(self) -> Dict[str, int]:
+        """Confirmed-alive per-class counts after windowed hysteresis (feeds energy estimation)."""
+        with self._lock:
+            counts: Dict[str, int] = {}
+            for class_name, tracks in self._tracks.items():
+                n = sum(1 for t in tracks if len(t.hit_timestamps_ns) >= self._min_hits)
+                if n:
+                    counts[class_name] = n
+            return counts
+
+
+def build_rgb_sample_callback(
+    detector: EnergyDetector,
+    aggregator: ApplianceScanAggregator,
+    sample_hz: float = ENERGY_FRAME_SAMPLE_HZ,
+) -> Tuple[Callable[[Any], None], Dict[str, Any]]:
+    """Build a throttled camera-rgb callback that detects+aggregates one frame at sample_hz.
+
+    Returns ``(callback, state)``. ``state`` is mutated in place with:
+    device-time ``first_ts``/``last_ts`` nanoseconds as frames arrive (used
+    for a duration cutoff, see scan_capture_rgb), and a ``stabilizer``
+    (DetectionStabilizer) that smooths raw per-frame detections before they
+    reach ``aggregator`` -- callers that want the instantaneous (unsmoothed)
+    view can read ``state["stabilizer"].instantaneous_counts()``. This is the
+    one place the throttle/rotate/detect/stabilize/aggregate step is defined,
+    shared by the batch ``scan_capture_rgb`` and the live dashboard
+    controller (``roomscan_live.py``).
+    """
+    from aria_capture import rotate_upright  # local import keeps module torch-only-optional
+
+    min_gap_ns = int(1e9 / sample_hz)
+    state: Dict[str, Any] = {
+        "last_ts": None,
+        "first_ts": None,
+        "stabilizer": DetectionStabilizer(),
+        "_logged_first_sample": False,
+        "_logged_first_stabilized": False,
+    }
+
+    def on_rgb(sample) -> None:
+        ts = sample.capture_timestamp_ns
+        if state["first_ts"] is None:
+            state["first_ts"] = ts
+        if state["last_ts"] is not None and ts - state["last_ts"] < min_gap_ns:
+            return
+        state["last_ts"] = ts
+        if not state["_logged_first_sample"]:
+            logger.info("build_rgb_sample_callback: first sampled frame accepted (ts_ns=%d).", ts)
+            state["_logged_first_sample"] = True
+        upright = rotate_upright(sample.frame)
+        if sample.pixel_format != "rgb":
+            upright = np.repeat(upright[:, :, None], 3, axis=2)
+        raw_detections = detector.detect(upright)
+        stabilized = state["stabilizer"].update(raw_detections, ts)
+        aggregator.observe_frame(stabilized, upright)
+        logger.debug(
+            "on_rgb sampled frame: raw_detections=%d stabilized=%d frames_observed=%d",
+            len(raw_detections), len(stabilized), aggregator.frames_observed,
+        )
+        if stabilized and not state["_logged_first_stabilized"]:
+            logger.info(
+                "build_rgb_sample_callback: first stabilized detection(s) reached the aggregator: %s",
+                [d.class_name for d in stabilized],
+            )
+            state["_logged_first_stabilized"] = True
+
+    return on_rgb, state
 
 
 def scan_capture_rgb(
@@ -181,22 +420,7 @@ def scan_capture_rgb(
     detection throughput so the sampler sees the full recording. Leave False
     for live capture, where drop-stale is the correct behavior.
     """
-    from aria_capture import rotate_upright  # local import keeps module torch-only-optional
-
-    min_gap_ns = int(1e9 / sample_hz)
-    state = {"last_ts": None, "first_ts": None}
-
-    def on_rgb(sample) -> None:
-        ts = sample.capture_timestamp_ns
-        if state["first_ts"] is None:
-            state["first_ts"] = ts
-        if state["last_ts"] is not None and ts - state["last_ts"] < min_gap_ns:
-            return
-        state["last_ts"] = ts
-        upright = rotate_upright(sample.frame)
-        if sample.pixel_format != "rgb":
-            upright = np.repeat(upright[:, :, None], 3, axis=2)
-        aggregator.observe_frame(detector.detect(upright), upright)
+    on_rgb, state = build_rgb_sample_callback(detector, aggregator, sample_hz)
 
     capture.subscribe("camera-rgb", on_rgb)
     if pace_playback:

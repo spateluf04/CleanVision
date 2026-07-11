@@ -154,6 +154,8 @@ SUCCESS = "#4cf5a0"
 TEXT = "#edf6ff"
 MUTED = "#8aa3b9"
 BORDER = "#253649"
+WARNING = "#f5b942"
+DANGER = "#ff6b6b"
 BLUE_RING = (255, 170, 60)
 GREEN_RING = (80, 245, 160)
 RED_RING = (80, 80, 255)
@@ -257,6 +259,16 @@ ENERGY_DETECT_CONFIDENCE = 0.5
 ENERGY_FRAME_SAMPLE_HZ = 2.0
 # Minimum box area as a fraction of the frame; rejects sliver false positives.
 ENERGY_MIN_BOX_AREA_FRAC = 0.001
+
+# Temporal stabilization (energy_detector.DetectionStabilizer): smooths raw
+# per-frame detections before they reach ApplianceScanAggregator, so a single
+# noisy/missed frame can't flicker the live view or permanently inflate the
+# max-simultaneous count.
+ENERGY_STABILIZE_WINDOW_SECONDS = 3.0        # rolling window used to confirm a detection is real
+ENERGY_STABILIZE_MIN_HITS = 2                # hits needed within the window before a track counts
+ENERGY_STABILIZE_MAX_MISS_SECONDS = 1.5      # grace period a track survives with zero matching detections
+ENERGY_STABILIZE_IOU_MATCH_THRESHOLD = 0.3   # min IOU to match a detection to an existing track
+ENERGY_DUPLICATE_BOX_IOU_THRESHOLD = 0.6     # same-frame same-class boxes above this IOU count as one object
 # COCO classes treated as energy-drawing appliances. Keys are exact YOLO/COCO
 # class names; per-class typical draw and daily usage assumptions drive the
 # kWh estimate (hackathon-grade priors, not measurements).
@@ -270,14 +282,68 @@ ENERGY_CATALOG = {
     "hair drier": {"display": "Hair dryer", "watts_active": 1500.0, "watts_standby": 0.0, "hours_per_day": 0.1},
     "cell phone": {"display": "Phone (charging)", "watts_active": 5.0, "watts_standby": 0.5, "hours_per_day": 2.0},
     "clock": {"display": "Clock", "watts_active": 2.0, "watts_standby": 0.0, "hours_per_day": 24.0},
+    # Forward-looking entries for energy_recommendations.py's cooling-inefficiency
+    # rule (fan + AC running together). Not COCO classes, so the stock
+    # COCO-pretrained yolov8n.pt weights energy_detector.py loads today can
+    # never emit "fan"/"air conditioner" -- these exist so the catalog, the
+    # estimator, and the recommendation rule are all ready the moment a
+    # fine-tuned/custom detector (or an ML/LLM recommendation layer) adds them.
+    "fan": {"display": "Fan", "watts_active": 50.0, "watts_standby": 0.0, "hours_per_day": 8.0},
+    "air conditioner": {"display": "Air conditioner", "watts_active": 1500.0, "watts_standby": 1.0, "hours_per_day": 6.0},
 }
 ENERGY_COST_PER_KWH_USD = 0.17
 ROOMSCAN_OUTPUT_DIR = BASE_DIR / "roomscan_out"
 ROOMSCAN_REPORT_JSON_NAME = "roomscan_report.json"
 ROOMSCAN_REPORT_HTML_NAME = "roomscan_report.html"
 ROOMSCAN_CROP_DIR_NAME = "crops"
+# Session index (energy_sessions.py): one small JSON file at the root of
+# ROOMSCAN_OUTPUT_DIR that indexes every saved scan's summary + a pointer
+# back to its own <out_dir>/roomscan_report.{json,html} -- it never replaces
+# or duplicates the per-session report/crops, only makes them listable.
+ROOMSCAN_SESSIONS_INDEX_NAME = "roomscan_sessions.json"
+ROOMSCAN_SESSIONS_SUMMARY_CSV_NAME = "roomscan_sessions_summary.csv"
 # Live mode scans for this long by default; VRS mode consumes the whole file.
 ROOMSCAN_LIVE_DURATION_SECONDS = 60.0
+# Default interval between live-dashboard snapshot ticks (roomscan_live.py),
+# decoupled from ENERGY_FRAME_SAMPLE_HZ so UI push rate != detection rate.
+ROOMSCAN_LIVE_TICK_SECONDS = 1.0
+
+# RoomScan live dashboard (PyQt5, roomscan_dashboard.py). Reuses the shared
+# dark theme palette above (PANEL_BG/SURFACE_BG/ACCENT/SUCCESS/TEXT/MUTED/
+# BORDER) for visual consistency with training_dashboard.py; these are
+# layout sizes specific to RoomScan's different panel content.
+ROOMSCAN_DASHBOARD_WINDOW_WIDTH = 1440
+ROOMSCAN_DASHBOARD_WINDOW_HEIGHT = 900
+ROOMSCAN_DASHBOARD_SIDEBAR_WIDTH = 260
+ROOMSCAN_DASHBOARD_RIGHT_WIDTH = 320
+ROOMSCAN_DASHBOARD_CAMERA_WIDTH = 640
+ROOMSCAN_DASHBOARD_CAMERA_HEIGHT = 480
+ROOMSCAN_DASHBOARD_BOTTOM_HEIGHT = 300
+ROOMSCAN_DASHBOARD_FRAME_POLL_MS = 100
+# If latest_frame() is still None this long after Start Scan, the camera panel
+# escalates from the routine "Waiting for RGB frames..." message to a visible
+# stale-connection warning instead of waiting silently forever.
+ROOMSCAN_DASHBOARD_STALE_FRAME_TIMEOUT_S = 8.0
+ROOMSCAN_TOP_DRAINS_COUNT = 3
+# Folder-naming contract for a saved live session's <room-slug>_<timestamp>
+# output directory (roomscan_live.py:session_out_dir), matching the
+# session_id shape energy_sessions.py documents (e.g. kitchen_20260101_120000).
+ROOMSCAN_SESSION_DIR_TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
+ROOMSCAN_COMPARE_DIALOG_WIDTH = 760
+ROOMSCAN_COMPARE_DIALOG_HEIGHT = 480
+ROOMSCAN_STATUS_DOT_SIZE_PX = 14
+ROOMSCAN_SUMMARY_DIALOG_WIDTH = 480
+ROOMSCAN_SUMMARY_DIALOG_HEIGHT = 460
+# How many suggestions the end-of-scan "Room Efficiency Summary" dialog shows
+# (the live "Ways To Save Energy" panel during a scan shows the full list;
+# this trims to the highest-value few for a clean final-summary read).
+ROOMSCAN_SUMMARY_RECOMMENDATIONS_COUNT = 3
+# Hackathon-grade efficiency-rating cutoffs (estimated annual electricity
+# cost of just the devices this scan found) for the end-of-scan summary
+# badge -- same "typical-draw priors, not measurements" caveat as
+# ENERGY_CATALOG; tune freely without touching roomscan_dashboard.py.
+ROOMSCAN_EFFICIENCY_GOOD_MAX_COST_USD = 150.0
+ROOMSCAN_EFFICIENCY_FAIR_MAX_COST_USD = 400.0
 
 
 if __name__ == "__main__":

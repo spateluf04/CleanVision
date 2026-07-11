@@ -31,7 +31,7 @@ wsl -d Ubuntu -- bash -c 'cd "/mnt/c/.../RoomScan" && ~/aria-venv/bin/python <sc
 ```bash
 python -m pytest tests/
 ```
-Single test: `python -m pytest tests/test_system.py::CsvOperationTests::test_csv_operations`. Tests import project modules directly (no package install) via a `sys.path` insert in `tests/test_system.py`, so always run pytest from the repo root.
+Two suites: `tests/test_system.py` (air-writing critical path — normalization, dwell segmentation, CSV/training-state persistence, checkpoint inference) and `tests/test_energy.py` (RoomScan counting/crop logic + catalog math, no YOLO/torch needed). Single test: `python -m pytest tests/test_system.py::CsvOperationTests::test_csv_operations`. Both import project modules directly (no package install) via a `sys.path` insert at the top of each test file, so always run pytest from the repo root.
 
 ### Data collection (offline, from a VRS file)
 
@@ -93,6 +93,13 @@ python3 energy_report.py --json roomscan_out/roomscan_report.json   # regenerate
 python3 energy_detector.py --vrs /path/to/recording.vrs             # detection-only debug scan
 ```
 Requires `ultralytics` (auto-downloads `yolov8n.pt` on first run; gitignored via `*.pt`). Outputs `roomscan_report.json`, per-instance crops, and a self-contained `roomscan_report.html` (base64-inlined crops — openable anywhere with no server). Exit 0 if appliances were found, 2 if none, per `roomscan.py:main()`.
+
+### Aria SDK / streaming troubleshooting
+
+- `The SDK is not paired with the device` -> `aria auth pair` then `aria auth check`.
+- `Streaming error (9) Failed to start recording` -> `aria streaming stop && aria recording stop`, retry after a short wait.
+- `No devices found over USB` -> re-seat the cable, avoid hubs, verify with `aria device list`.
+- `ModuleNotFoundError` on any script -> the venv isn't active; `source ~/aria-venv/bin/activate` (or the WSL equivalent).
 
 ## Architecture
 

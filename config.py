@@ -249,7 +249,9 @@ HEALTHCHECK_RATE_TOLERANCE = 0.10
 
 # Energy audit (energy_detector.py, energy_estimator.py, roomscan.py, energy_report.py)
 ENERGY_YOLO_WEIGHTS = "yolov8n.pt"
-ENERGY_DETECT_CONFIDENCE = 0.35
+# 0.5 verified on sample.vrs: keeps real TV (0.94) / clock (0.75), rejects a
+# dark-armchair-as-TV false positive (0.44).
+ENERGY_DETECT_CONFIDENCE = 0.5
 # RGB frames are sampled at this rate (device time) for detection; the camera
 # runs faster but per-frame YOLO on every frame buys nothing for a room scan.
 ENERGY_FRAME_SAMPLE_HZ = 2.0

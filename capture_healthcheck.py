@@ -136,7 +136,7 @@ def print_calibration_summary(capture: AriaCapture) -> None:
         principal = calib.get_principal_point()
         size = calib.get_image_size()
         print(
-            f"  {label:20s} model={calib.get_model_name()} "
+            f"  {label:20s} model={calib.model_name()} "
             f"focal=({focal[0]:.2f}, {focal[1]:.2f}) "
             f"principal=({principal[0]:.2f}, {principal[1]:.2f}) "
             f"size={int(size[0])}x{int(size[1])}"

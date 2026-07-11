@@ -441,7 +441,7 @@ class AriaCapture:
             logger.info(
                 "Calibration %s: model=%s focal=(%.2f, %.2f) principal=(%.2f, %.2f)",
                 label,
-                cam_calib.get_model_name(),
+                cam_calib.model_name(),
                 focal[0],
                 focal[1],
                 principal[0],

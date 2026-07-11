@@ -8,6 +8,7 @@ root, same as test_system.py.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import threading
@@ -28,7 +29,13 @@ from energy_detector import (
     _suppress_duplicate_boxes,
     build_rgb_sample_callback,
 )
-from energy_estimator import DAYS_PER_YEAR, estimate_device, estimate_room, is_appliance
+from energy_estimator import (
+    DAYS_PER_YEAR,
+    estimate_device,
+    estimate_discovered_device,
+    estimate_room,
+    is_appliance,
+)
 from energy_recommendations import NO_DEVICES_MESSAGE, generate_recommendations
 
 
@@ -82,6 +89,80 @@ class AggregatorTests(unittest.TestCase):
         self.assertEqual(agg.counts(), {})
 
 
+class GeminiVerdictTests(unittest.TestCase):
+    def test_unverified_slots_includes_freshly_observed_crop(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5)], frame(10))
+        unverified = agg.unverified_slots()
+        self.assertEqual(len(unverified), 1)
+        name, idx, confidence, crop = unverified[0]
+        self.assertEqual((name, idx, confidence), ("tv", 0, 0.5))
+        self.assertTrue((crop == 10).all())
+
+    def test_record_rejected_verdict_excludes_from_counts_and_crops(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5)], frame(10))
+        ok = agg.record_gemini_verdict("tv", 0, 0.5, accepted=False)
+        self.assertTrue(ok)
+        self.assertEqual(agg.counts(), {})
+        self.assertEqual(agg.best_crops(), {"tv": []})
+        self.assertEqual(agg.best_confidences(), {"tv": []})
+        self.assertEqual(agg.gemini_rejected_classes(), ["tv"])
+        self.assertEqual(agg.unverified_slots(), [])
+
+    def test_record_accepted_verdict_keeps_slot_and_marks_verified(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5)], frame(10))
+        ok = agg.record_gemini_verdict("tv", 0, 0.5, accepted=True)
+        self.assertTrue(ok)
+        self.assertEqual(agg.counts(), {"tv": 1})
+        self.assertEqual(agg.gemini_rejected_classes(), [])
+        self.assertEqual(agg.unverified_slots(), [])
+
+    def test_stale_verdict_after_confidence_moved_on_is_a_no_op(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5)], frame(10))
+        # Verdict computed against the old (0.5) confidence, but a higher-confidence
+        # detection arrives before the verdict is applied.
+        agg.observe_frame([det("tv", 0.9)], frame(200))
+        ok = agg.record_gemini_verdict("tv", 0, 0.5, accepted=False)
+        self.assertFalse(ok)
+        self.assertEqual(agg.counts(), {"tv": 1})  # rejection was never applied
+        self.assertEqual(agg.gemini_rejected_classes(), [])
+
+    def test_replacement_crop_clears_prior_rejection(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5)], frame(10))
+        agg.record_gemini_verdict("tv", 0, 0.5, accepted=False)
+        self.assertEqual(agg.counts(), {})
+        agg.observe_frame([det("tv", 0.9)], frame(200))  # higher confidence replaces the crop
+        self.assertEqual(agg.counts(), {"tv": 1})
+        self.assertEqual(agg.gemini_rejected_classes(), [])
+        unverified = agg.unverified_slots()
+        self.assertEqual(len(unverified), 1)
+        self.assertEqual(unverified[0][:3], ("tv", 0, 0.9))
+
+    def test_unknown_slot_or_class_returns_false(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5)], frame(10))
+        self.assertFalse(agg.record_gemini_verdict("laptop", 0, 0.5, accepted=False))
+        self.assertFalse(agg.record_gemini_verdict("tv", 5, 0.5, accepted=False))
+
+    def test_accepted_verdict_note_surfaces_in_best_notes(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5)], frame(10))
+        ok = agg.record_gemini_verdict("tv", 0, 0.5, accepted=True, note="55-inch wall-mounted LED TV")
+        self.assertTrue(ok)
+        self.assertEqual(agg.best_notes(), {"tv": ["55-inch wall-mounted LED TV"]})
+
+    def test_replacement_crop_clears_prior_note(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5)], frame(10))
+        agg.record_gemini_verdict("tv", 0, 0.5, accepted=True, note="55-inch wall-mounted LED TV")
+        agg.observe_frame([det("tv", 0.9)], frame(200))  # higher confidence replaces the crop
+        self.assertEqual(agg.best_notes(), {"tv": [None]})
+
+
 class DuplicateBoxSuppressionTests(unittest.TestCase):
     def test_heavily_overlapping_same_class_collapsed(self) -> None:
         dets = [det("tv", 0.9, (10, 10, 50, 50)), det("tv", 0.4, (11, 10, 51, 50))]
@@ -114,6 +195,17 @@ class DetectionStabilizerTests(unittest.TestCase):
         result = stab.update([det("tv", 0.9)], int(0.5e9))
         self.assertEqual(len(result), 1)
         self.assertEqual(stab.stabilized_counts(), {"tv": 1})
+
+    def test_live_detections_reflects_last_update_call(self) -> None:
+        stab = DetectionStabilizer(window_seconds=3.0, min_hits=2)
+        self.assertEqual(stab.live_detections(), [])
+        stab.update([det("tv", 0.8)], 0)
+        self.assertEqual(stab.live_detections(), [])  # not yet confirmed
+        stab.update([det("tv", 0.9)], int(0.5e9))
+        live = stab.live_detections()
+        self.assertEqual(len(live), 1)
+        self.assertEqual(live[0].class_name, "tv")
+        self.assertEqual(live[0].box_xyxy, (10, 10, 50, 50))
 
     def test_single_missed_frame_does_not_drop_track(self) -> None:
         stab = DetectionStabilizer(window_seconds=3.0, min_hits=2, max_miss_seconds=1.5)
@@ -263,6 +355,24 @@ class ThreadSafetyTests(unittest.TestCase):
 
         self._run_concurrently(writer, reader)
 
+    def test_aggregator_gemini_verdicts_race_with_observe_and_reads(self) -> None:
+        agg = ApplianceScanAggregator()
+
+        def writer(i: int) -> None:
+            name = self.CLASS_NAMES[i % len(self.CLASS_NAMES)]
+            agg.observe_frame([det(name, 0.5 + (i % 10) * 0.01)], frame(10))
+            for cls_name, idx, confidence, _crop in agg.unverified_slots():
+                agg.record_gemini_verdict(cls_name, idx, confidence, accepted=(idx % 2 == 0))
+
+        def reader() -> None:
+            agg.counts()
+            agg.best_crops()
+            agg.best_confidences()
+            agg.unverified_slots()
+            agg.gemini_rejected_classes()
+
+        self._run_concurrently(writer, reader)
+
     def test_stabilizer_update_races_with_reads(self) -> None:
         stab = DetectionStabilizer(window_seconds=3.0, min_hits=1)
 
@@ -303,6 +413,120 @@ class FinalizeScanTests(unittest.TestCase):
             self.assertTrue((out_dir / "roomscan_report.html").exists())
             self.assertEqual(report["scan"]["room_name"], "Kitchen")
             self.assertTrue(any(s["session_id"] == out_dir.name for s in sessions))
+
+    def test_finalize_scan_defaults_gemini_fields_to_empty_for_batch_scan(self) -> None:
+        import energy_sessions
+        from roomscan import finalize_scan
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out_dir = tmp_path / "living_room_20260101_000000"
+            agg = ApplianceScanAggregator()
+            agg.observe_frame([det("tv", 0.9)], frame(10))
+
+            original_output_dir = energy_sessions.ROOMSCAN_OUTPUT_DIR
+            energy_sessions.ROOMSCAN_OUTPUT_DIR = tmp_path
+            try:
+                report = finalize_scan("Living room", "test", agg, 1.0, out_dir)
+            finally:
+                energy_sessions.ROOMSCAN_OUTPUT_DIR = original_output_dir
+
+            self.assertEqual(report["gemini_discovered_devices"], [])
+            self.assertEqual(report["scan"]["gemini_rejected_classes"], [])
+
+    def test_finalize_scan_passes_through_gemini_discovered_devices(self) -> None:
+        import energy_sessions
+        from roomscan import finalize_scan
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out_dir = tmp_path / "office_20260101_000000"
+            agg = ApplianceScanAggregator()
+            agg.observe_frame([det("tv", 0.9)], frame(10))
+            discovered = [{"name": "Kettle", "description": "On the counter.", "sightings": 3}]
+
+            original_output_dir = energy_sessions.ROOMSCAN_OUTPUT_DIR
+            energy_sessions.ROOMSCAN_OUTPUT_DIR = tmp_path
+            try:
+                report = finalize_scan(
+                    "Office", "test", agg, 1.0, out_dir, gemini_discovered_devices=discovered
+                )
+                written = json.loads((out_dir / "roomscan_report.json").read_text(encoding="utf-8"))
+            finally:
+                energy_sessions.ROOMSCAN_OUTPUT_DIR = original_output_dir
+
+            self.assertEqual(report["gemini_discovered_devices"], discovered)
+            self.assertEqual(written["gemini_discovered_devices"], discovered)
+
+    def test_build_report_prices_gemini_discovered_devices_into_device_list(self) -> None:
+        from roomscan import build_report
+
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.9)], frame(10))
+        discovered = [
+            {
+                "name": "Ceiling Light",
+                "description": "LED, over the couch.",
+                "sightings": 2,
+                "watts_active": 10.0,
+                "hours_per_day": 5.0,
+                "count": 3,
+            }
+        ]
+        report = build_report("Kitchen", "test", agg, {}, 1.0, gemini_discovered_devices=discovered)
+
+        priced = [d for d in report["devices"] if d["class_name"] == "ceiling light"]
+        self.assertEqual(len(priced), 1)
+        device = priced[0]
+        self.assertEqual(device["source"], "gemini_discovered")
+        self.assertEqual(device["count"], 3)
+        self.assertAlmostEqual(device["kwh_per_day"], 10.0 * 5.0 * 3 / 1000.0)
+        self.assertIn("LED, over the couch.", device["notes"])
+        self.assertIn("Seen 2x this scan", device["notes"])
+
+        # Totals must include both the catalog device (tv) and the priced discovery.
+        expected_total_kwh_year = sum(d["kwh_per_year"] for d in report["devices"])
+        self.assertAlmostEqual(report["totals"]["kwh_per_year"], expected_total_kwh_year)
+        self.assertEqual(report["totals"]["device_count"], sum(d["count"] for d in report["devices"]))
+
+    def test_build_report_gemini_discovered_devices_default_watts_hours_when_missing(self) -> None:
+        from roomscan import build_report
+
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.9)], frame(10))
+        # Older-shaped discovery dict with no watts_active/hours_per_day keys.
+        discovered = [{"name": "Kettle", "description": "On the counter.", "sightings": 3}]
+        report = build_report("Kitchen", "test", agg, {}, 1.0, gemini_discovered_devices=discovered)
+
+        priced = [d for d in report["devices"] if d["class_name"] == "kettle"]
+        self.assertEqual(len(priced), 1)
+        self.assertAlmostEqual(
+            priced[0]["watts_active"], config.GEMINI_DISCOVERY_DEFAULT_WATTS
+        )
+        self.assertAlmostEqual(
+            priced[0]["hours_per_day"], config.GEMINI_DISCOVERY_DEFAULT_HOURS_PER_DAY
+        )
+
+    def test_finalize_scan_surfaces_gemini_rejected_classes(self) -> None:
+        import energy_sessions
+        from roomscan import finalize_scan
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            out_dir = tmp_path / "hallway_20260101_000000"
+            agg = ApplianceScanAggregator()
+            agg.observe_frame([det("tv", 0.9)], frame(10))
+            agg.record_gemini_verdict("tv", 0, 0.9, accepted=False)
+
+            original_output_dir = energy_sessions.ROOMSCAN_OUTPUT_DIR
+            energy_sessions.ROOMSCAN_OUTPUT_DIR = tmp_path
+            try:
+                report = finalize_scan("Hallway", "test", agg, 1.0, out_dir)
+            finally:
+                energy_sessions.ROOMSCAN_OUTPUT_DIR = original_output_dir
+
+            self.assertEqual(report["scan"]["gemini_rejected_classes"], ["tv"])
+            self.assertNotIn("tv", [d["class_name"] for d in report["devices"]])
 
 
 class EstimatorTests(unittest.TestCase):
@@ -346,6 +570,31 @@ class EstimatorTests(unittest.TestCase):
         for name in config.ENERGY_CATALOG:
             self.assertTrue(is_appliance(name))
         self.assertFalse(is_appliance("person"))
+
+    def test_estimate_discovered_device_math(self) -> None:
+        est = estimate_discovered_device("Ceiling Light", 10.0, 5.0)
+        self.assertEqual(est.class_name, "ceiling light")
+        self.assertEqual(est.display_name, "Ceiling Light")
+        self.assertEqual(est.count, 1)
+        self.assertEqual(est.watts_standby, 0.0)
+        self.assertAlmostEqual(est.kwh_per_day, 10.0 * 5.0 / 1000.0)
+        self.assertAlmostEqual(est.kwh_per_year, est.kwh_per_day * DAYS_PER_YEAR)
+        self.assertAlmostEqual(est.cost_per_year_usd, est.kwh_per_year * config.ENERGY_COST_PER_KWH_USD)
+
+    def test_estimate_discovered_device_clamps_negative_and_out_of_range(self) -> None:
+        est = estimate_discovered_device("Weird Device", -5.0, 30.0)
+        self.assertEqual(est.watts_active, 0.0)
+        self.assertEqual(est.hours_per_day, 24.0)
+
+    def test_estimate_discovered_device_scales_by_count(self) -> None:
+        est = estimate_discovered_device("Ceiling Light", 10.0, 5.0, count=3)
+        self.assertEqual(est.count, 3)
+        self.assertAlmostEqual(est.kwh_per_day, 10.0 * 5.0 * 3 / 1000.0)
+        self.assertAlmostEqual(est.kwh_per_year, est.kwh_per_day * DAYS_PER_YEAR)
+
+    def test_estimate_discovered_device_count_floors_at_one(self) -> None:
+        est = estimate_discovered_device("Ceiling Light", 10.0, 5.0, count=0)
+        self.assertEqual(est.count, 1)
 
 
 class RecommendationTests(unittest.TestCase):
@@ -448,6 +697,105 @@ class ReportRecommendationsTests(unittest.TestCase):
             render_html(report, out_dir, html_path)
             page = html_path.read_text(encoding="utf-8")
         self.assertNotIn("Recommended Actions", page)
+
+    def test_render_html_includes_priced_gemini_discovered_device_card(self) -> None:
+        import tempfile
+
+        from roomscan import build_report
+        from energy_report import render_html
+
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("refrigerator", 0.7)], frame(10))
+        discovered = [
+            {
+                "name": "Kettle",
+                "description": "On the counter.",
+                "sightings": 2,
+                "watts_active": 1200.0,
+                "hours_per_day": 0.5,
+            }
+        ]
+        report = build_report("Kitchen", "test", agg, {}, 1.0, gemini_discovered_devices=discovered)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            html_path = out_dir / "report.html"
+            render_html(report, out_dir, html_path)
+            page = html_path.read_text(encoding="utf-8")
+        self.assertIn("Kettle", page)
+        self.assertIn("Seen 2x this scan", page)
+        self.assertIn('<span class="ai-badge">AI</span>', page)
+
+    def test_render_html_omits_ai_badge_when_no_discovered_devices(self) -> None:
+        import tempfile
+
+        from roomscan import build_report
+        from energy_report import render_html
+
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("refrigerator", 0.7)], frame(10))
+        report = build_report("Kitchen", "test", agg, {}, 1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            html_path = out_dir / "report.html"
+            render_html(report, out_dir, html_path)
+            page = html_path.read_text(encoding="utf-8")
+        self.assertNotIn('<span class="ai-badge">AI</span>', page)
+
+    def test_render_html_includes_gemini_rejected_note_when_present(self) -> None:
+        import tempfile
+
+        from roomscan import build_report
+        from energy_report import render_html
+
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.9)], frame(10))
+        agg.record_gemini_verdict("tv", 0, 0.9, accepted=False)
+        report = build_report("Kitchen", "test", agg, {}, 1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            html_path = out_dir / "report.html"
+            render_html(report, out_dir, html_path)
+            page = html_path.read_text(encoding="utf-8")
+        self.assertIn("Gemini vision auto-corrected", page)
+        self.assertIn(config.ENERGY_CATALOG["tv"]["display"], page)
+
+    def test_render_html_omits_gemini_rejected_note_when_none_rejected(self) -> None:
+        import tempfile
+
+        from roomscan import build_report
+        from energy_report import render_html
+
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("refrigerator", 0.7)], frame(10))
+        report = build_report("Kitchen", "test", agg, {}, 1.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            html_path = out_dir / "report.html"
+            render_html(report, out_dir, html_path)
+            page = html_path.read_text(encoding="utf-8")
+        self.assertNotIn("Gemini vision auto-corrected", page)
+
+    def test_render_html_handles_report_missing_gemini_keys(self) -> None:
+        # test_render_html_omits_section_when_no_recommendations's hand-built
+        # report dict has no gemini_discovered_devices/gemini_rejected_classes
+        # keys at all -- render_html() must not KeyError on it.
+        import tempfile
+
+        from energy_report import render_html
+
+        report = {
+            "scan": {"room_name": "Empty", "source": "test", "generated_at": "now", "frames_sampled": 0},
+            "devices": [],
+            "totals": {"device_count": 0, "kwh_per_day": 0.0, "kwh_per_year": 0.0, "cost_per_year_usd": 0.0, "cost_per_kwh_usd": 0.17},
+            "recommendations": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            html_path = out_dir / "report.html"
+            render_html(report, out_dir, html_path)  # should not raise
+            page = html_path.read_text(encoding="utf-8")
+        self.assertNotIn('<span class="ai-badge">AI</span>', page)
+        self.assertNotIn("Gemini vision auto-corrected", page)
 
 
 if __name__ == "__main__":

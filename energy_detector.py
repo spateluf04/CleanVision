@@ -98,6 +98,21 @@ def _suppress_duplicate_boxes(
 class _CropSlot:
     confidence: float
     crop_rgb: np.ndarray  # upright RGB uint8
+    # Gemini live-verification watermark (energy_gemini.run_live_scan_pass, via
+    # roomscan_live.py's background pass): gemini_checked_confidence records the
+    # confidence this slot had the last time Gemini judged its current crop, so
+    # unverified_slots() can tell "never checked" and "checked, but a newer crop
+    # replaced it" apart from "checked at this exact crop" with a simple
+    # equality watermark -- no separate dirty flag needed. gemini_rejected is
+    # the verdict itself; both fields are reset the instant a higher-confidence
+    # detection replaces the crop (see observe_frame), so a rejection never
+    # outlives the pixels it was judged on. gemini_note is a short free-text
+    # type/model detail Gemini attaches while verifying (e.g. "55-inch
+    # wall-mounted LED TV") -- purely descriptive, never affects counting --
+    # and is reset alongside the other two fields on crop replacement.
+    gemini_rejected: bool = False
+    gemini_checked_confidence: Optional[float] = None
+    gemini_note: Optional[str] = None
 
 
 class ApplianceScanAggregator:
@@ -136,25 +151,108 @@ class ApplianceScanAggregator:
                 for i, det in enumerate(dets):
                     if det.confidence > slots[i].confidence:
                         slots[i].confidence = det.confidence
+                        # New crop pixels = an unverified candidate again; any
+                        # prior Gemini verdict applied to the OLD pixels, so it
+                        # must not silently carry over onto the new ones.
+                        slots[i].gemini_rejected = False
+                        slots[i].gemini_checked_confidence = None
+                        slots[i].gemini_note = None
                         if frame_rgb is not None:
                             slots[i].crop_rgb = _extract_crop(frame_rgb, det.box_xyxy)
 
     def counts(self) -> Dict[str, int]:
-        """{class_name: max simultaneous detections seen in one frame}."""
+        """{class_name: max simultaneous detections seen in one frame}, excluding
+        slots Gemini has rejected as a misclassification (see record_gemini_verdict)."""
         with self._lock:
-            return {name: len(slots) for name, slots in self._slots.items() if slots}
+            result: Dict[str, int] = {}
+            for name, slots in self._slots.items():
+                n = sum(1 for s in slots if not s.gemini_rejected)
+                if n:
+                    result[name] = n
+            return result
 
     def best_crops(self) -> Dict[str, List[np.ndarray]]:
-        """Per class, one best-confidence RGB crop per counted instance slot."""
+        """Per class, one best-confidence RGB crop per counted instance slot
+        (Gemini-rejected slots excluded, matching counts())."""
         with self._lock:
             return {
-                name: [s.crop_rgb for s in slots if s.crop_rgb is not None]
+                name: [s.crop_rgb for s in slots if s.crop_rgb is not None and not s.gemini_rejected]
                 for name, slots in self._slots.items()
             }
 
     def best_confidences(self) -> Dict[str, List[float]]:
         with self._lock:
-            return {name: [round(s.confidence, 3) for s in slots] for name, slots in self._slots.items()}
+            return {
+                name: [round(s.confidence, 3) for s in slots if not s.gemini_rejected]
+                for name, slots in self._slots.items()
+            }
+
+    def best_notes(self) -> Dict[str, List[Optional[str]]]:
+        """Per class, one Gemini type/model note per counted instance slot
+        (None where Gemini hasn't verified the slot or gave no note),
+        same order/filtering as best_confidences()/best_crops()."""
+        with self._lock:
+            return {
+                name: [s.gemini_note for s in slots if not s.gemini_rejected]
+                for name, slots in self._slots.items()
+            }
+
+    def unverified_slots(self) -> List[Tuple[str, int, float, Optional[np.ndarray]]]:
+        """Every ``(class_name, slot_index, confidence, crop_rgb)`` slot whose
+        crop hasn't been Gemini-judged at its current confidence yet.
+
+        Comparing ``gemini_checked_confidence`` (a watermark, not a dirty flag)
+        against the slot's live ``confidence`` is what makes a crop replacement
+        automatically re-enter the unverified pool: observe_frame() resets the
+        watermark to None on replacement, so a not-yet-equal comparison is true
+        again without any extra bookkeeping here.
+        """
+        with self._lock:
+            result: List[Tuple[str, int, float, Optional[np.ndarray]]] = []
+            for name, slots in self._slots.items():
+                for idx, slot in enumerate(slots):
+                    if slot.crop_rgb is None:
+                        continue
+                    if slot.gemini_checked_confidence != slot.confidence:
+                        result.append((name, idx, slot.confidence, slot.crop_rgb))
+            return result
+
+    def record_gemini_verdict(
+        self,
+        class_name: str,
+        slot_index: int,
+        expected_confidence: float,
+        accepted: bool,
+        note: Optional[str] = None,
+    ) -> bool:
+        """Compare-and-swap write of a Gemini verify verdict onto one crop slot.
+
+        ``note`` is an optional short type/model detail (e.g. "55-inch
+        wall-mounted LED TV") Gemini attached while verifying -- purely
+        descriptive, stored regardless of ``accepted`` but only surfaced via
+        best_notes() for non-rejected slots.
+
+        Returns False (a no-op) if the slot moved on since the caller read it
+        via unverified_slots() -- a new, higher-confidence crop replaced it (or
+        the class/index no longer exists) -- so a stale verdict is discarded
+        rather than misapplied to pixels it never actually judged.
+        """
+        with self._lock:
+            slots = self._slots.get(class_name)
+            if slots is None or slot_index >= len(slots):
+                return False
+            slot = slots[slot_index]
+            if slot.confidence != expected_confidence:
+                return False
+            slot.gemini_checked_confidence = expected_confidence
+            slot.gemini_rejected = not accepted
+            slot.gemini_note = note
+            return True
+
+    def gemini_rejected_classes(self) -> List[str]:
+        """Classes with >=1 currently-rejected slot, for the UI's misclassification hint."""
+        with self._lock:
+            return sorted(name for name, slots in self._slots.items() if any(s.gemini_rejected for s in slots))
 
 
 def _extract_crop(frame_rgb: np.ndarray, box_xyxy: Tuple[int, int, int, int]) -> np.ndarray:
@@ -256,9 +354,11 @@ class DetectionStabilizer:
         self._iou_match_threshold = iou_match_threshold
         self._tracks: Dict[str, List[_Track]] = {}
         self._instantaneous_counts: Dict[str, int] = {}
+        self._last_stabilized: List[Detection] = []
         # Same cross-thread hazard as ApplianceScanAggregator: update() runs on
         # AriaCapture's dispatcher thread, stabilized_counts()/
-        # instantaneous_counts() are read from the Qt main/ticker thread.
+        # instantaneous_counts()/live_detections() are read from the Qt
+        # main/ticker thread.
         self._lock = threading.Lock()
 
     def update(self, detections: List[Detection], timestamp_ns: int) -> List[Detection]:
@@ -322,12 +422,22 @@ class DetectionStabilizer:
                 else:
                     self._tracks.pop(class_name, None)
 
+            self._last_stabilized = stabilized
             return stabilized
 
     def instantaneous_counts(self) -> Dict[str, int]:
         """Raw, unfiltered per-class counts from the most recently observed frame."""
         with self._lock:
             return dict(self._instantaneous_counts)
+
+    def live_detections(self) -> List[Detection]:
+        """Snapshot of the most recently confirmed (stabilized) detections,
+        each with its box -- for a live bounding-box overlay. Independent of
+        update()'s per-call return value so a UI poller (running on its own
+        timer, not the capture callback) can read the latest state at any
+        cadence."""
+        with self._lock:
+            return list(self._last_stabilized)
 
     def stabilized_counts(self) -> Dict[str, int]:
         """Confirmed-alive per-class counts after windowed hysteresis (feeds energy estimation)."""

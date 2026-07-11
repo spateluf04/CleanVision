@@ -20,7 +20,7 @@ import argparse
 import threading
 import time
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
@@ -28,17 +28,24 @@ from aria_capture import AriaCapture, rotate_upright
 from config import (
     CAPTURE_SOURCE_LIVE,
     DEFAULT_STREAM_PROFILE,
+    ENERGY_CATALOG,
     ENERGY_DETECT_CONFIDENCE,
     ENERGY_FRAME_SAMPLE_HZ,
+    GEMINI_DISCOVERY_DEFAULT_COUNT,
+    GEMINI_DISCOVERY_DEFAULT_HOURS_PER_DAY,
+    GEMINI_DISCOVERY_DEFAULT_WATTS,
+    GEMINI_LIVE_PASS_INTERVAL_SECONDS,
+    GEMINI_VERIFY_MAX_CROPS,
     ROOMSCAN_LIVE_TICK_SECONDS,
     ROOMSCAN_OUTPUT_DIR,
     ROOMSCAN_REPORT_HTML_NAME,
     ROOMSCAN_SESSION_DIR_TIMESTAMP_FORMAT,
 )
-from energy_detector import ApplianceScanAggregator, EnergyDetector, build_rgb_sample_callback
+from energy_detector import ApplianceScanAggregator, Detection, EnergyDetector, build_rgb_sample_callback
 from energy_estimator import estimate_room
+from energy_gemini import ai_features_enabled, run_live_scan_pass
 from logging_utils import get_logger
-from roomscan import finalize_scan, merge_device_estimate_fields
+from roomscan import finalize_scan, merge_device_estimate_fields, merge_discovered_devices
 
 logger = get_logger(__name__)
 
@@ -112,6 +119,29 @@ class LiveScanController:
         self._finished = False
         self._logged_first_latest_frame = False
         self._logged_first_snapshot_frame = False
+        # Gemini live verification/discovery (energy_gemini.run_live_scan_pass):
+        # unconditionally initialized so this state is always safe to read from
+        # snapshot()/finish() -- e.g. FakeLiveScanController in
+        # tests/test_roomscan_dashboard.py overrides start() entirely and never
+        # spins the pass thread, but still calls the real snapshot()/finish().
+        self._gemini_pass_stop_event = threading.Event()
+        self._gemini_pass_thread: Optional[threading.Thread] = None
+        # Non-blocking guard: if a Gemini call from the previous tick is still
+        # in flight when the next tick fires, that tick is skipped outright
+        # rather than queuing up, so a slow/stuck call can never pile up passes.
+        self._gemini_pass_lock = threading.Lock()
+        self._gemini_discovered_lock = threading.Lock()
+        # lowercased name -> {"name", "description", "sightings"}; sightings
+        # increments (rather than duplicating) when the same non-catalog
+        # appliance type is discovered again on a later pass.
+        self._gemini_discovered: Dict[str, Dict[str, object]] = {}
+        # Simple flags for the dashboard's "AI just ran" indicator -- plain
+        # attributes (not lock-guarded) are fine here, same convention this
+        # class already uses for _logged_first_latest_frame etc.: read from
+        # the Qt poll thread, written from the Gemini pass thread, and a torn
+        # read of a bool/float is never actually observable in CPython.
+        self._gemini_pass_active = False
+        self._gemini_last_pass_ts: Optional[float] = None
 
     def start(self) -> None:
         """Begin continuous live capture (+ detection, unless disabled)."""
@@ -138,6 +168,24 @@ class LiveScanController:
             self._capture.use_ephemeral_certs,
             self.disable_detection,
         )
+        if self._should_run_gemini_pass():
+            self._gemini_pass_stop_event.clear()
+            self._gemini_pass_thread = threading.Thread(
+                target=self._gemini_pass_loop, name="roomscan-gemini-live-pass", daemon=True
+            )
+            self._gemini_pass_thread.start()
+            logger.info(
+                "Gemini live verification/discovery pass thread started for room '%s' (interval=%.1fs).",
+                self.room_name, GEMINI_LIVE_PASS_INTERVAL_SECONDS,
+            )
+
+    def _should_run_gemini_pass(self) -> bool:
+        """Gate for the background Gemini pass thread: never runs in
+        --debug-camera-only mode (no detector/aggregator activity to verify
+        or discover against) or without GEMINI_API_KEY set. Kept as its own
+        method (rather than inlined in start()) so it's directly unit-testable
+        without needing a full start()/AriaCapture connection."""
+        return not self.disable_detection and ai_features_enabled()
 
     @property
     def running(self) -> bool:
@@ -189,6 +237,86 @@ class LiveScanController:
             logger.debug("latest_frame() returning frame (ts_ns=%d).", sample.capture_timestamp_ns)
         return frame
 
+    def latest_detections(self) -> List[Detection]:
+        """Most recently confirmed (stabilized) detections, box included, for
+        drawing a live bounding-box overlay on top of latest_frame(). Always
+        empty in --debug-camera-only mode (no detector/sample loop running)
+        or before the first stabilized detection of the scan."""
+        if self._sample_state is None:
+            return []
+        return self._sample_state["stabilizer"].live_detections()
+
+    def _known_display_names(self) -> List[str]:
+        """Appliance-type names Gemini should never re-report as "discovered":
+        every catalog display name (YOLO could tag these directly) plus
+        anything already surfaced by an earlier pass this session."""
+        names = [entry["display"] for entry in ENERGY_CATALOG.values()]
+        names.extend(item["name"] for item in self._gemini_discovered_list())
+        return names
+
+    def _gemini_discovered_list(self) -> List[Dict[str, object]]:
+        with self._gemini_discovered_lock:
+            return [dict(item) for item in self._gemini_discovered.values()]
+
+    def _run_gemini_pass_once(self) -> None:
+        """One combined Gemini verify+discover pass. Skips outright (rather
+        than blocking) if the previous pass is still in flight, so a slow or
+        stuck call can never cause passes to pile up on this daemon thread.
+        run_live_scan_pass() itself never raises, but this is still wrapped
+        defensively -- a background thread with an uncaught exception dies
+        silently, which would be far harder to notice than a logged warning.
+        """
+        if not self._gemini_pass_lock.acquire(blocking=False):
+            logger.debug("Gemini live pass still running; skipping this tick.")
+            return
+        self._gemini_pass_active = True
+        try:
+            candidates = self._aggregator.unverified_slots()[:GEMINI_VERIFY_MAX_CROPS]
+            frame = self.latest_frame()
+            result = run_live_scan_pass(candidates, frame, self._known_display_names())
+            for class_name, slot_index, confidence, accepted, note in result["verifications"]:
+                self._aggregator.record_gemini_verdict(class_name, slot_index, confidence, accepted, note=note)
+            if result["discovered"]:
+                with self._gemini_discovered_lock:
+                    for item in result["discovered"]:
+                        key = item["name"].lower()
+                        existing = self._gemini_discovered.get(key)
+                        if existing is not None:
+                            existing["sightings"] += 1
+                            existing["description"] = item.get("description", "") or existing["description"]
+                            existing["watts_active"] = item.get("watts_active", existing["watts_active"])
+                            existing["hours_per_day"] = item.get("hours_per_day", existing["hours_per_day"])
+                            # Max-simultaneous rule (mirrors ApplianceScanAggregator.counts()):
+                            # a later pass reporting fewer instances (e.g. panned away from
+                            # some lights) never lowers the count, only a higher one raises it.
+                            existing["count"] = max(
+                                existing.get("count", GEMINI_DISCOVERY_DEFAULT_COUNT),
+                                item.get("count", GEMINI_DISCOVERY_DEFAULT_COUNT),
+                            )
+                        else:
+                            self._gemini_discovered[key] = {
+                                "name": item["name"],
+                                "description": item.get("description", ""),
+                                "sightings": 1,
+                                "watts_active": item.get("watts_active", GEMINI_DISCOVERY_DEFAULT_WATTS),
+                                "hours_per_day": item.get("hours_per_day", GEMINI_DISCOVERY_DEFAULT_HOURS_PER_DAY),
+                                "count": item.get("count", GEMINI_DISCOVERY_DEFAULT_COUNT),
+                            }
+                logger.info(
+                    "Gemini live pass for room '%s' discovered/updated %d appliance type(s).",
+                    self.room_name, len(result["discovered"]),
+                )
+        except Exception as exc:
+            logger.warning("Gemini live pass tick failed unexpectedly (%s); skipping this tick.", exc)
+        finally:
+            self._gemini_pass_active = False
+            self._gemini_last_pass_ts = time.monotonic()
+            self._gemini_pass_lock.release()
+
+    def _gemini_pass_loop(self) -> None:
+        while not self._gemini_pass_stop_event.wait(GEMINI_LIVE_PASS_INTERVAL_SECONDS):
+            self._run_gemini_pass_once()
+
     def snapshot(self) -> Dict[str, object]:
         """Return the current incremental scan state.
 
@@ -197,7 +325,10 @@ class LiveScanController:
         ApplianceScanAggregator.counts() already works mid-scan.
         """
         estimate = estimate_room(self._aggregator.counts())
-        merge_device_estimate_fields(estimate["devices"], self._aggregator.best_confidences(), None)
+        merge_device_estimate_fields(
+            estimate["devices"], self._aggregator.best_confidences(), None, self._aggregator.best_notes()
+        )
+        merge_discovered_devices(estimate, self._gemini_discovered_list())
         watts_active_total = sum(d["watts_active"] * d["count"] for d in estimate["devices"])
         stabilizer = self._sample_state["stabilizer"] if self._sample_state else None
         frames_sampled = self._aggregator.frames_observed
@@ -215,6 +346,11 @@ class LiveScanController:
             "totals": {**estimate["totals"], "watts_active": watts_active_total},
             "instantaneous_counts": stabilizer.instantaneous_counts() if stabilizer else {},
             "stabilized_counts": stabilizer.stabilized_counts() if stabilizer else {},
+            "gemini_discovered_devices": self._gemini_discovered_list(),
+            "gemini_rejected_classes": self._aggregator.gemini_rejected_classes(),
+            "gemini_verification_enabled": self._should_run_gemini_pass(),
+            "gemini_pass_active": self._gemini_pass_active,
+            "gemini_last_pass_ts": self._gemini_last_pass_ts,
         }
 
     def run_ticker(
@@ -242,6 +378,11 @@ class LiveScanController:
 
     def stop(self) -> None:
         """Stop capture; the last scan state remains readable via snapshot()."""
+        # Signal the Gemini pass thread even if it was never started -- Event
+        # objects are safe to set() unconditionally, and this guarantees a
+        # thread that IS running gets told to stop as soon as its current
+        # tick (if any) finishes, rather than only on finish()/GC.
+        self._gemini_pass_stop_event.set()
         if self._running:
             self._capture.stop()
             self._running = False
@@ -253,14 +394,20 @@ class LiveScanController:
         Reuses roomscan.py's finalize_scan() (build_report + save_crops +
         JSON/HTML write + session registration) exactly as the batch CLI
         does, so the output artifacts are identical whether the scan came
-        from --vrs, --live, or this live dashboard controller.
+        from --vrs, --live, or this live dashboard controller. Any
+        Gemini-discovered non-catalog appliances accumulated this session are
+        threaded through and priced into the final device list/totals too
+        (see roomscan.py:merge_discovered_devices()).
         """
         if self._finished:
             raise RuntimeError("LiveScanController.finish() already called.")
         self.stop()
         scan_wall_seconds = self.seconds_since_start()
 
-        report = finalize_scan(self.room_name, "live", self._aggregator, scan_wall_seconds, Path(out_dir))
+        report = finalize_scan(
+            self.room_name, "live", self._aggregator, scan_wall_seconds, Path(out_dir),
+            gemini_discovered_devices=self._gemini_discovered_list(),
+        )
 
         self._finished = True
         logger.info("Live scan finished for room '%s'; wrote report to %s.", self.room_name, out_dir)

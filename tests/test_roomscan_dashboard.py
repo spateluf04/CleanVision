@@ -70,6 +70,17 @@ class FakeLiveScanController(LiveScanController):
     def feed(self, class_name: str, confidence: float) -> None:
         self._aggregator.observe_frame([_det(class_name, confidence)], _frame(10))
 
+    def reject_class(self, class_name: str, confidence: float) -> None:
+        """Feed a detection, then simulate a Gemini live-verification
+        rejection for it (as _run_gemini_pass_once() would apply)."""
+        self.feed(class_name, confidence)
+        self._aggregator.record_gemini_verdict(class_name, 0, confidence, accepted=False)
+
+    def feed_gemini_discovery(self, name: str, description: str = "") -> None:
+        """Seed a Gemini-discovered non-catalog device directly, as
+        _run_gemini_pass_once() would after a real live pass."""
+        self._gemini_discovered[name.lower()] = {"name": name, "description": description, "sightings": 1}
+
 
 class DashboardLifecycleTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -125,6 +136,27 @@ class DashboardLifecycleTests(unittest.TestCase):
         self.assertEqual(self.window._device_table.item(0, 0).text(), "Television")
         self.assertNotEqual(self.window._watts_value.text(), "--")
         self.assertNotEqual(self.window._cost_value.text(), "--")
+
+    def test_device_table_tooltip_shows_gemini_note(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller.feed("tv", 0.9)
+        self.window._controller._aggregator.record_gemini_verdict(
+            "tv", 0, 0.9, accepted=True, note="55-inch wall-mounted LED TV"
+        )
+
+        self.window._poll_stats()
+
+        self.assertEqual(self.window._device_table.item(0, 0).toolTip(), "55-inch wall-mounted LED TV")
+
+    def test_device_table_no_tooltip_without_gemini_note(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller.feed("tv", 0.9)
+
+        self.window._poll_stats()
+
+        self.assertEqual(self.window._device_table.item(0, 0).toolTip(), "")
 
     def test_poll_frame_renders_pixmap(self) -> None:
         self.window._room_name_edit.setText("Kitchen")
@@ -220,6 +252,109 @@ class DashboardLifecycleTests(unittest.TestCase):
         self.window._poll_stats()
         self.assertIn("Live feed active", self.window._status_label.text())
 
+    def test_gemini_flag_hidden_when_no_rejections(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller.feed("tv", 0.9)
+
+        self.window._poll_stats()
+
+        self.assertTrue(self.window._gemini_flag_label.isHidden())
+
+    def test_gemini_flag_shown_on_rejection(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller.reject_class("tv", 0.9)
+
+        self.window._poll_stats()
+
+        self.assertFalse(self.window._gemini_flag_label.isHidden())
+        self.assertIn("tv", self.window._gemini_flag_label.text())
+
+    def test_device_table_shows_ai_badge_for_gemini_discovered_device(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller.feed("tv", 0.9)
+        self.window._controller._gemini_discovered["kettle"] = {
+            "name": "Kettle",
+            "description": "On the counter.",
+            "sightings": 1,
+            "watts_active": 1200.0,
+            "hours_per_day": 0.5,
+        }
+
+        self.window._poll_stats()
+
+        rows = {
+            self.window._device_table.item(row, 0).text(): row
+            for row in range(self.window._device_table.rowCount())
+        }
+        self.assertIn("Kettle", rows)
+        kettle_row = rows["Kettle"]
+        self.assertEqual(self.window._device_table.item(kettle_row, 2).text(), "AI")
+
+    def test_device_table_shows_count_and_total_power_for_multiple_discovered_lights(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller._gemini_discovered["ceiling light"] = {
+            "name": "Ceiling Light",
+            "description": "LED fixture.",
+            "sightings": 1,
+            "watts_active": 9.0,
+            "hours_per_day": 5.0,
+            "count": 3,
+        }
+
+        self.window._poll_stats()
+
+        rows = {
+            self.window._device_table.item(row, 0).text(): row
+            for row in range(self.window._device_table.rowCount())
+        }
+        self.assertIn("Ceiling Light", rows)
+        row = rows["Ceiling Light"]
+        self.assertEqual(self.window._device_table.item(row, 1).text(), "3")
+        self.assertEqual(self.window._device_table.item(row, 2).text(), "AI")
+        self.assertEqual(self.window._device_table.item(row, 3).text(), "27 W")
+        self.assertEqual(self.window._device_table.item(row, 0).toolTip(), "LED fixture.")
+
+    def test_gemini_discovered_label_shown_when_present(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller.feed_gemini_discovery("Kettle", "On the counter.")
+
+        self.window._poll_stats()
+
+        self.assertFalse(self.window._gemini_discovered_label.isHidden())
+        self.assertIn("Kettle", self.window._gemini_discovered_label.text())
+
+    def test_gemini_discovered_label_hidden_when_empty(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller.feed("tv", 0.9)
+
+        self.window._poll_stats()
+
+        self.assertTrue(self.window._gemini_discovered_label.isHidden())
+
+    def test_start_clicked_hides_gemini_widgets_from_prior_room(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller.reject_class("tv", 0.9)
+        self.window._controller.feed_gemini_discovery("Kettle")
+        self.window._poll_stats()
+        self.assertFalse(self.window._gemini_flag_label.isHidden())
+        self.assertFalse(self.window._gemini_discovered_label.isHidden())
+
+        self.window._on_stop_clicked()
+        self.window._on_save_clicked()
+
+        self.window._room_name_edit.setText("Bedroom")
+        self.window._on_start_clicked()
+
+        self.assertTrue(self.window._gemini_flag_label.isHidden())
+        self.assertTrue(self.window._gemini_discovered_label.isHidden())
+
     def test_compare_requires_exactly_two_selected_sessions(self) -> None:
         for room in ("Kitchen", "Bedroom"):
             self.window._room_name_edit.setText(room)
@@ -235,6 +370,75 @@ class DashboardLifecycleTests(unittest.TestCase):
         with mock.patch.object(dashboard_module.QMessageBox, "information") as mock_info:
             self.window._on_compare_clicked()  # only one selected -- must not raise
         mock_info.assert_called_once()
+
+    def test_draw_detection_boxes_modifies_frame_when_detections_present(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        frame = _frame(42)
+
+        with mock.patch.object(self.window._controller, "latest_detections", return_value=[_det("tv", 0.9)]):
+            result = self.window._draw_detection_boxes(frame)
+
+        self.assertTrue(np.any(result != 42))
+
+    def test_draw_detection_boxes_is_noop_without_detections(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        frame = _frame(42)
+
+        result = self.window._draw_detection_boxes(frame)
+
+        self.assertTrue(np.all(result == 42))
+
+    def test_ai_indicator_hidden_when_verification_not_enabled(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller.feed("tv", 0.9)
+
+        with mock.patch("roomscan_live.ai_features_enabled", return_value=False):
+            self.window._poll_stats()
+
+        self.assertTrue(self.window._ai_status_label.isHidden())
+
+    def test_ai_indicator_shows_while_pass_active(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller._gemini_pass_active = True
+
+        with mock.patch("roomscan_live.ai_features_enabled", return_value=True):
+            self.window._poll_stats()
+
+        self.assertFalse(self.window._ai_status_label.isHidden())
+        self.assertIn("checking", self.window._ai_status_label.text().lower())
+
+    def test_ai_indicator_flashes_complete_after_pass_finishes(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller._gemini_pass_active = False
+        self.window._controller._gemini_last_pass_ts = time.monotonic()
+
+        with mock.patch("roomscan_live.ai_features_enabled", return_value=True):
+            self.window._poll_stats()
+
+        self.assertFalse(self.window._ai_status_label.isHidden())
+        self.assertIn("complete", self.window._ai_status_label.text().lower())
+
+    def test_ai_indicator_hides_after_flash_duration_elapses(self) -> None:
+        self.window._room_name_edit.setText("Kitchen")
+        self.window._on_start_clicked()
+        self.window._controller._gemini_pass_active = False
+        self.window._controller._gemini_last_pass_ts = time.monotonic()
+
+        with mock.patch("roomscan_live.ai_features_enabled", return_value=True):
+            self.window._poll_stats()
+        self.assertFalse(self.window._ai_status_label.isHidden())
+
+        future = time.monotonic() + dashboard_module.ROOMSCAN_AI_FLASH_DURATION_S + 1
+        with mock.patch("roomscan_dashboard.time.monotonic", return_value=future):
+            with mock.patch("roomscan_live.ai_features_enabled", return_value=True):
+                self.window._poll_stats()
+
+        self.assertTrue(self.window._ai_status_label.isHidden())
 
 
 if __name__ == "__main__":

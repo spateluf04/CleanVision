@@ -76,6 +76,36 @@ def estimate_device(class_name: str, count: int) -> DeviceEstimate:
     )
 
 
+def estimate_discovered_device(
+    name: str, watts_active: float, hours_per_day: float, count: int = 1
+) -> DeviceEstimate:
+    """Price a Gemini-discovered non-catalog device (see energy_gemini.py's
+    run_live_scan_pass) using the same kWh/cost math as estimate_device(),
+    but from vision-estimated per-unit watts/hours instead of an
+    ENERGY_CATALOG lookup, scaled by ``count`` individual instances Gemini
+    reported seeing (e.g. 3 separate ceiling lights) -- mirroring how
+    estimate_device() scales a catalog class's per-unit draw by its instance
+    count. No separate standby draw is modeled: Gemini's watts estimate is
+    already treated as the all-day-average per-unit active figure.
+    """
+    watts = max(0.0, float(watts_active))
+    hours = max(0.0, min(24.0, float(hours_per_day)))
+    units = max(1, int(count))
+    kwh_per_day = watts * hours * units / 1000.0
+    kwh_per_year = kwh_per_day * DAYS_PER_YEAR
+    return DeviceEstimate(
+        class_name=name.strip().lower(),
+        display_name=name,
+        count=units,
+        watts_active=watts,
+        watts_standby=0.0,
+        hours_per_day=hours,
+        kwh_per_day=kwh_per_day,
+        kwh_per_year=kwh_per_year,
+        cost_per_year_usd=kwh_per_year * ENERGY_COST_PER_KWH_USD,
+    )
+
+
 def estimate_room(counts: Dict[str, int]) -> Dict[str, object]:
     """Build the full room estimate from ``{class_name: instance_count}``.
 

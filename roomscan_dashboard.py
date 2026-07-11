@@ -25,10 +25,12 @@ totals-delta dialog, and Export writes a CSV of every recorded session.
 
 import argparse
 import sys
+import time
 import webbrowser
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QImage, QPixmap
@@ -56,8 +58,10 @@ from config import (
     BORDER,
     DANGER,
     DEFAULT_STREAM_PROFILE,
+    ENERGY_CATALOG,
     MUTED,
     PANEL_BG,
+    ROOMSCAN_AI_FLASH_DURATION_S,
     ROOMSCAN_COMPARE_DIALOG_HEIGHT,
     ROOMSCAN_COMPARE_DIALOG_WIDTH,
     ROOMSCAN_DASHBOARD_BOTTOM_HEIGHT,
@@ -69,6 +73,8 @@ from config import (
     ROOMSCAN_DASHBOARD_STALE_FRAME_TIMEOUT_S,
     ROOMSCAN_DASHBOARD_WINDOW_HEIGHT,
     ROOMSCAN_DASHBOARD_WINDOW_WIDTH,
+    ROOMSCAN_DETECTION_BOX_COLOR_RGB,
+    ROOMSCAN_DETECTION_BOX_THICKNESS,
     ROOMSCAN_EFFICIENCY_FAIR_MAX_COST_USD,
     ROOMSCAN_EFFICIENCY_GOOD_MAX_COST_USD,
     ROOMSCAN_LIVE_TICK_SECONDS,
@@ -313,6 +319,12 @@ class RoomScanDashboard(QMainWindow):
         self._last_camera_error: Optional[str] = None
         self._logged_first_devices_in_table = False
         self._logged_stale_frame_warning = False
+        # "AI just ran" flash indicator (see _update_ai_indicator): tracks the
+        # last gemini_last_pass_ts we've already reacted to, so a repeated
+        # snapshot() poll doesn't restart the flash timer every tick, plus
+        # the monotonic deadline the flash message stays visible until.
+        self._last_seen_gemini_pass_ts: Optional[float] = None
+        self._ai_flash_until: Optional[float] = None
 
         title = "RoomScan — Home Energy Scanner"
         if self._debug_camera_only:
@@ -428,6 +440,15 @@ class RoomScanDashboard(QMainWindow):
         self._camera_label.setFixedSize(ROOMSCAN_DASHBOARD_CAMERA_WIDTH, ROOMSCAN_DASHBOARD_CAMERA_HEIGHT)
         self._camera_label.setStyleSheet(f"background-color: #000; color: {MUTED}; border: none;")
         layout.addWidget(self._camera_label)
+        # "AI just ran" indicator (see _update_ai_indicator): hidden until the
+        # background Gemini live-verification/discovery pass is actually
+        # active or has just completed, same hidden-until-populated pattern
+        # as _gemini_flag_label/_gemini_discovered_label below.
+        self._ai_status_label = QLabel("")
+        self._ai_status_label.setAlignment(Qt.AlignCenter)
+        self._ai_status_label.setStyleSheet(f"color: {ACCENT}; font-size: 12px; font-weight: 600; border: none;")
+        self._ai_status_label.hide()
+        layout.addWidget(self._ai_status_label)
         layout.addStretch(1)
         return panel
 
@@ -475,6 +496,22 @@ class RoomScanDashboard(QMainWindow):
         self._device_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._device_table.setStyleSheet(f"background-color: {PANEL_BG}; border: none;")
         devices_panel._content_layout.addWidget(self._device_table)
+        # Gemini live-verification/discovery surfacing: a warning banner when
+        # a class was auto-corrected (rejected) this scan, and a note listing
+        # any non-catalog appliance types Gemini spotted but never prices.
+        # Both start hidden -- shown only once _poll_stats sees something to
+        # report -- and are hidden again by _show_pre_scan_placeholders /
+        # _on_start_clicked's leftover-results clear.
+        self._gemini_flag_label = QLabel("")
+        self._gemini_flag_label.setWordWrap(True)
+        self._gemini_flag_label.setStyleSheet(f"color: {WARNING}; font-size: 12px; border: none;")
+        self._gemini_flag_label.hide()
+        devices_panel._content_layout.addWidget(self._gemini_flag_label)
+        self._gemini_discovered_label = QLabel("")
+        self._gemini_discovered_label.setWordWrap(True)
+        self._gemini_discovered_label.setStyleSheet(f"color: {MUTED}; font-size: 12px; border: none;")
+        self._gemini_discovered_label.hide()
+        devices_panel._content_layout.addWidget(self._gemini_discovered_label)
         row.addWidget(devices_panel, 2)
 
         drains_panel = self._panel("Biggest Energy Users", fixed_width=ROOMSCAN_DASHBOARD_RIGHT_WIDTH)
@@ -515,6 +552,9 @@ class RoomScanDashboard(QMainWindow):
         self._top_drains_list.addItem(_placeholder_item(PRE_SCAN_DRAINS_MESSAGE))
         self._recommendations_list.clear()
         self._recommendations_list.addItem(_placeholder_item(PRE_SCAN_TIPS_MESSAGE))
+        self._gemini_flag_label.hide()
+        self._gemini_discovered_label.hide()
+        self._ai_status_label.hide()
 
     # ------------------------------------------------------------------
     # Scan status indicator
@@ -574,6 +614,11 @@ class RoomScanDashboard(QMainWindow):
         self._device_table.setRowCount(0)
         self._top_drains_list.clear()
         self._recommendations_list.clear()
+        self._gemini_flag_label.hide()
+        self._gemini_discovered_label.hide()
+        self._last_seen_gemini_pass_ts = None
+        self._ai_flash_until = None
+        self._ai_status_label.hide()
 
         # No frame has arrived for *this* scan yet -- replace whatever the
         # camera label was showing (pre-scan placeholder or a prior room's
@@ -713,6 +758,27 @@ class RoomScanDashboard(QMainWindow):
             self._last_camera_error = message
         self._set_camera_message(f"⚠ {CAMERA_ERROR_PREFIX}\n{message}", DANGER)
 
+    def _draw_detection_boxes(self, frame: np.ndarray) -> np.ndarray:
+        """Draw a box + label over each currently confirmed live detection,
+        directly on the RGB frame array before it becomes a QPixmap -- so the
+        boxes scale/aspect-fit together with the frame when
+        QPixmap.scaled() resizes it for display, rather than needing to be
+        repositioned separately. No-op (empty list) in --debug-camera-only
+        mode, since there's no detector running to produce detections."""
+        for det in self._controller.latest_detections():
+            x1, y1, x2, y2 = det.box_xyxy
+            cv2.rectangle(
+                frame, (x1, y1), (x2, y2), ROOMSCAN_DETECTION_BOX_COLOR_RGB, ROOMSCAN_DETECTION_BOX_THICKNESS
+            )
+            display_name = ENERGY_CATALOG.get(det.class_name, {}).get("display", det.class_name)
+            label = f"{display_name} {det.confidence:.0%}"
+            label_y = y1 - 6 if y1 - 6 > 10 else y1 + 16
+            cv2.putText(
+                frame, label, (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                ROOMSCAN_DETECTION_BOX_COLOR_RGB, 1, cv2.LINE_AA,
+            )
+        return frame
+
     def _poll_frame(self) -> None:
         if self._controller is None:
             return
@@ -749,6 +815,7 @@ class RoomScanDashboard(QMainWindow):
 
         frame = np.ascontiguousarray(frame)
         self._last_avg_brightness = float(frame.mean())
+        frame = self._draw_detection_boxes(frame)
         height, width, _ = frame.shape
         qimage = QImage(frame.data, width, height, 3 * width, QImage.Format_RGB888).copy()
         pixmap = QPixmap.fromImage(qimage).scaled(
@@ -801,6 +868,9 @@ class RoomScanDashboard(QMainWindow):
         self._update_device_table(devices)
         self._update_top_drains(devices)
         self._update_recommendations(devices, totals)
+        self._update_gemini_flag(state.get("gemini_rejected_classes", []))
+        self._update_gemini_discovered(state.get("gemini_discovered_devices", []))
+        self._update_ai_indicator(state)
 
     def _update_device_table(self, devices: List[Dict[str, object]]) -> None:
         table = self._device_table
@@ -813,19 +883,31 @@ class RoomScanDashboard(QMainWindow):
             self._logged_first_devices_in_table = True
         table.setRowCount(len(devices))
         for row, device in enumerate(devices):
-            confidences = device["confidences"]
-            best_confidence = max(confidences) if confidences else 0.0
+            is_gemini_discovered = device.get("source") == "gemini_discovered"
+            if is_gemini_discovered:
+                confidence_display = "AI"
+            else:
+                confidences = device["confidences"]
+                best_confidence = max(confidences) if confidences else 0.0
+                confidence_display = f"{best_confidence * 100:.0f}%"
             watts_total = device["watts_active"] * device["count"]
             values = [
                 device["display_name"],
                 str(device["count"]),
-                f"{best_confidence * 100:.0f}%",
+                confidence_display,
                 f"{watts_total:.0f} W",
                 f"${device['cost_per_year_usd']:.2f}",
             ]
+            # Gemini's optional per-instance type/model detail (e.g. "55-inch
+            # wall-mounted LED TV") surfaces as a tooltip on the device-name
+            # cell rather than a new column, so the fixed-size table layout
+            # never needs to change width just because AI notes are present.
+            notes = [n for n in device.get("notes", []) if n]
             for col, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignCenter)
+                if col == 0 and notes:
+                    item.setToolTip("\n".join(notes))
                 table.setItem(row, col, item)
 
     def _update_top_drains(self, devices: List[Dict[str, object]]) -> None:
@@ -847,6 +929,52 @@ class RoomScanDashboard(QMainWindow):
             if suggestion == NO_DEVICES_MESSAGE:
                 item.setForeground(QColor(MUTED))
             self._recommendations_list.addItem(item)
+
+    def _update_gemini_flag(self, rejected_classes: List[str]) -> None:
+        if not rejected_classes:
+            self._gemini_flag_label.hide()
+            return
+        self._gemini_flag_label.setText(
+            "⚠ Gemini auto-corrected a likely misclassification: " + ", ".join(rejected_classes)
+        )
+        self._gemini_flag_label.show()
+
+    def _update_gemini_discovered(self, discovered_devices: List[Dict[str, object]]) -> None:
+        if not discovered_devices:
+            self._gemini_discovered_label.hide()
+            return
+        names = ", ".join(d["name"] for d in discovered_devices)
+        self._gemini_discovered_label.setText(f"✨ AI-discovered devices added to list: {names}")
+        self._gemini_discovered_label.show()
+
+    def _update_ai_indicator(self, state: Dict[str, object]) -> None:
+        """Visual proof-of-life for the background Gemini live pass: shows
+        "verifying" while a call is actually in flight, then flashes "check
+        complete" for ROOMSCAN_AI_FLASH_DURATION_S once it finishes, so
+        every AI pass is visibly announced rather than only showing up as a
+        side effect (a note/rejection banner) users might not connect to AI
+        having run at all."""
+        if not state.get("gemini_verification_enabled"):
+            self._ai_status_label.hide()
+            return
+
+        if state.get("gemini_pass_active"):
+            self._ai_status_label.setText("✨ Gemini AI checking detections...")
+            self._ai_status_label.setStyleSheet(f"color: {ACCENT}; font-size: 12px; font-weight: 600; border: none;")
+            self._ai_status_label.show()
+            return
+
+        last_ts = state.get("gemini_last_pass_ts")
+        if last_ts is not None and last_ts != self._last_seen_gemini_pass_ts:
+            self._last_seen_gemini_pass_ts = last_ts
+            self._ai_flash_until = time.monotonic() + ROOMSCAN_AI_FLASH_DURATION_S
+
+        if self._ai_flash_until is not None and time.monotonic() < self._ai_flash_until:
+            self._ai_status_label.setText("✓ Gemini AI check complete")
+            self._ai_status_label.setStyleSheet(f"color: {SUCCESS}; font-size: 12px; font-weight: 600; border: none;")
+            self._ai_status_label.show()
+        else:
+            self._ai_status_label.hide()
 
     # ------------------------------------------------------------------
 

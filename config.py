@@ -316,10 +316,53 @@ ROOMSCAN_LIVE_TICK_SECONDS = 1.0
 # the live dashboard's per-tick recommendations panel and its instant
 # Stop-Scan summary dialog intentionally stay rule-based-only.
 GEMINI_API_KEY_ENV_VAR = "GEMINI_API_KEY"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-flash-latest"
 GEMINI_MAX_CROPS = 6              # cap images sent per request (cost/latency)
 GEMINI_MAX_RECOMMENDATIONS = 5
 GEMINI_TIMEOUT_SECONDS = 12.0
+
+# Live-scan Gemini verification + discovery (energy_gemini.run_live_scan_pass,
+# via roomscan_live.py's background pass thread). Same GEMINI_API_KEY gate and
+# fallback-on-any-failure philosophy as the recommendations feature above --
+# see energy_gemini.py module docstring. Interval is kept comfortably above
+# GEMINI_TIMEOUT_SECONDS so a slow call never overlaps the next pass.
+GEMINI_LIVE_PASS_INTERVAL_SECONDS = 13.0
+GEMINI_VERIFY_MAX_CROPS = 4        # unverified candidates re-checked per pass
+GEMINI_MAX_DISCOVERED = 4          # AI-discovered non-catalog names accepted per pass
+GEMINI_DISCOVERY_MAX_DIM = 768     # full-frame longest-side downscale before upload
+GEMINI_NOTE_MAX_CHARS = 80         # cap on a verified slot's type/model note (UI tooltip length)
+# Pricing a Gemini-discovered (non-catalog) device: Gemini is asked to also
+# estimate typical active wattage + daily usage hours per discovered item
+# (energy_gemini.run_live_scan_pass) so roomscan.py:merge_discovered_devices()
+# can price it the same way as a catalog device and fold it into the same
+# device list/totals, instead of only an unpriced call-out. Defaults/clamp
+# are defensive since these numbers are a vision-model guess, not a
+# lookup-table measurement.
+GEMINI_DISCOVERY_DEFAULT_WATTS = 15.0
+GEMINI_DISCOVERY_DEFAULT_HOURS_PER_DAY = 4.0
+GEMINI_DISCOVERY_MAX_WATTS = 5000.0
+# Gemini is also asked to count how many individual instances of a discovered
+# type are visible in one frame (e.g. 3 separate ceiling lights), so pricing
+# scales with the real fixture count instead of always treating a discovered
+# type as a single unit. GEMINI_DISCOVERY_MAX_COUNT is a sanity clamp against
+# a runaway/garbled vision-model count, not a realistic expected count.
+GEMINI_DISCOVERY_DEFAULT_COUNT = 1
+GEMINI_DISCOVERY_MAX_COUNT = 50
+# When Gemini's per-item estimated_watts is missing/invalid for a discovered
+# lighting fixture, fall back to a bulb-type-specific reference wattage
+# (looked up from the fixture's own description, e.g. "LED ceiling light")
+# instead of the flat GEMINI_DISCOVERY_DEFAULT_WATTS -- a much closer guess
+# than one generic default across LED/CFL/halogen/fluorescent/incandescent.
+# Checked in this order (first substring match wins), so more specific terms
+# ("cfl"/"compact fluorescent") are listed before the generic "fluorescent".
+GEMINI_BULB_TYPE_WATTS = {
+    "led": 9.0,
+    "cfl": 14.0,
+    "compact fluorescent": 14.0,
+    "halogen": 43.0,
+    "fluorescent": 32.0,
+    "incandescent": 60.0,
+}
 
 # RoomScan live dashboard (PyQt5, roomscan_dashboard.py). Reuses the shared
 # dark theme palette above (PANEL_BG/SURFACE_BG/ACCENT/SUCCESS/TEXT/MUTED/
@@ -357,6 +400,17 @@ ROOMSCAN_SUMMARY_RECOMMENDATIONS_COUNT = 3
 # ENERGY_CATALOG; tune freely without touching roomscan_dashboard.py.
 ROOMSCAN_EFFICIENCY_GOOD_MAX_COST_USD = 150.0
 ROOMSCAN_EFFICIENCY_FAIR_MAX_COST_USD = 400.0
+# Live camera-view bounding-box overlay (roomscan_dashboard.py:_poll_frame,
+# drawn from LiveScanController.latest_detections()). RGB (not BGR) since the
+# overlay is drawn directly on the same upright RGB frame array the label
+# displays -- cv2 draw calls don't care about channel order, only that the
+# color tuple and the image agree.
+ROOMSCAN_DETECTION_BOX_COLOR_RGB = (61, 214, 255)  # matches ACCENT
+ROOMSCAN_DETECTION_BOX_THICKNESS = 2
+# "AI just ran" flash indicator under the camera view (roomscan_dashboard.py):
+# how long the "Gemini AI check complete" message stays visible after a live
+# verification/discovery pass finishes, before the label hides itself again.
+ROOMSCAN_AI_FLASH_DURATION_S = 2.5
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Dict, List
 
-from config import ROOMSCAN_OUTPUT_DIR, ROOMSCAN_REPORT_HTML_NAME, ROOMSCAN_REPORT_JSON_NAME
+from config import ENERGY_CATALOG, ROOMSCAN_OUTPUT_DIR, ROOMSCAN_REPORT_HTML_NAME, ROOMSCAN_REPORT_JSON_NAME
 from logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -40,11 +40,14 @@ h1 { font-size: 1.9rem; margin-bottom: 4px; }
 .card .cnt { color: #5dd0a0; font-weight: 600; }
 .row { display: flex; justify-content: space-between; font-size: 0.9rem; padding: 3px 0; color: #b7bfcd; }
 .row b { color: #e6e9ef; font-weight: 600; }
+.row.note { display: block; color: #f5b942; font-size: 0.82rem; padding-bottom: 8px; }
 .noimg { height: 170px; display: flex; align-items: center; justify-content: center; color: #4a5265; background: #0b0e13; }
 .recs { margin: 28px 0; }
 .recs h2 { font-size: 1.2rem; margin-bottom: 12px; }
 .recs ul { list-style: none; display: flex; flex-direction: column; gap: 8px; }
 .recs li { background: #171c26; border: 1px solid #232a38; border-left: 3px solid #5dd0a0; border-radius: 8px; padding: 12px 16px; font-size: 0.92rem; color: #dbe1ea; }
+.gemini-note { color: #f5b942; font-size: 0.85rem; margin: 8px 0 28px; }
+.ai-badge { display: inline-block; background: #2a2410; color: #f5b942; border: 1px solid #f5b942; border-radius: 6px; font-size: 0.7rem; font-weight: 600; padding: 1px 7px; margin-left: 8px; vertical-align: middle; }
 footer { margin-top: 36px; color: #5a6375; font-size: 0.8rem; }
 """
 
@@ -68,11 +71,15 @@ def _device_card(device: Dict[str, object], out_dir: Path) -> str:
     else:
         img_block = '<div class="noimg">no snapshot</div>'
     name = html.escape(str(device["display_name"]))
+    notes = [html.escape(str(n)) for n in device.get("notes", []) if n]
+    notes_block = f'<div class="row note">{" &middot; ".join(notes)}</div>' if notes else ""
+    badge = '<span class="ai-badge">AI</span>' if device.get("source") == "gemini_discovered" else ""
     return f"""
   <div class="card">
     {img_block}
     <div class="body">
-      <h2>{name} <span class="cnt">&times;{device['count']}</span></h2>
+      <h2>{name} <span class="cnt">&times;{device['count']}</span>{badge}</h2>
+      {notes_block}
       <div class="row"><span>Active draw</span><b>{device['watts_active']:.0f} W</b></div>
       <div class="row"><span>Assumed use</span><b>{device['hours_per_day']:g} h/day</b></div>
       <div class="row"><span>Energy</span><b>{device['kwh_per_day']:.2f} kWh/day &middot; {device['kwh_per_year']:.0f} kWh/yr</b></div>
@@ -87,6 +94,14 @@ def _recommendations_block(report: Dict[str, object]) -> str:
         return ""
     lis = "".join(f"<li>{html.escape(str(s))}</li>" for s in items)
     return f'<div class="recs"><h2>Recommended Actions</h2><ul>{lis}</ul></div>'
+
+
+def _gemini_rejected_note(report: Dict[str, object]) -> str:
+    classes = report.get("scan", {}).get("gemini_rejected_classes", [])
+    if not classes:
+        return ""
+    names = ", ".join(html.escape(ENERGY_CATALOG.get(c, {}).get("display", c)) for c in classes)
+    return f'<div class="gemini-note">Gemini vision auto-corrected a likely misclassification and excluded it from: {names}.</div>'
 
 
 def render_html(report: Dict[str, object], out_dir: Path, html_path: Path) -> None:
@@ -112,6 +127,7 @@ def render_html(report: Dict[str, object], out_dir: Path, html_path: Path) -> No
 </div>
 <div class="grid">{cards}
 </div>
+{_gemini_rejected_note(report)}
 {_recommendations_block(report)}
 <footer>Estimates use typical-draw priors per appliance class, not measured consumption. Captured with Meta Project Aria Gen 1.</footer>
 </div></body></html>"""

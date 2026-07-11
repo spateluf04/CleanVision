@@ -199,6 +199,86 @@ ARIA_CAMERA_CALIBRATION_PATH = BASE_DIR / "aria_camera_calibration.json"
 UNDISTORT_FOCAL_SCALE = 0.72
 UNDISTORT_DISTORTION = (0.18, 0.05, 0.0, 0.0)
 
+# Capture / healthcheck (aria_capture.py, capture_healthcheck.py)
+CAPTURE_SOURCE_VRS = "vrs"
+CAPTURE_SOURCE_LIVE = "live"
+# Canonical stream labels consumers subscribe to. The Gen 1 eye-tracking camera
+# is ONE physical stream ("camera-et") holding both eyes side by side; capture
+# splits it into the two camera-et-* labels below.
+CAPTURE_IMAGE_LABELS = (
+    "camera-rgb",
+    "camera-slam-left",
+    "camera-slam-right",
+    "camera-et-left",
+    "camera-et-right",
+)
+CAPTURE_MOTION_LABELS = ("imu-right", "imu-left", "mag0", "baro0")
+CAPTURE_ALL_LABELS = CAPTURE_IMAGE_LABELS + CAPTURE_MOTION_LABELS
+CAPTURE_ET_COMBINED_LABEL = "camera-et"
+# VRS label aliases per physical stream (labels vary slightly across firmware
+# and tooling versions; resolution is by label, never by hardcoded stream id).
+CAPTURE_VRS_LABEL_ALIASES = {
+    "camera-rgb": tuple(RGB_LABEL_CANDIDATES),
+    "camera-slam-left": ("camera-slam-left", "slam-left"),
+    "camera-slam-right": ("camera-slam-right", "slam-right"),
+    CAPTURE_ET_COMBINED_LABEL: ("camera-et", "camera-eyetracking", "camera-et-left"),
+    "imu-right": ("imu-right",),
+    "imu-left": ("imu-left",),
+    "mag0": ("mag0", "magnetometer"),
+    "baro0": ("baro0", "barometer"),
+}
+CAPTURE_MOTION_DEQUE_MAXLEN = 2000
+CAPTURE_DISPATCH_IDLE_SLEEP_SECONDS = 0.001
+CAPTURE_VRS_BACKPRESSURE_SLEEP_SECONDS = 0.002
+# Nominal per-stream rate windows (Hz) for the Aria Gen 1 sensors.
+EXPECTED_STREAM_RATES_HZ = {
+    "camera-rgb": (10.0, 30.0),
+    "camera-slam-left": (10.0, 30.0),
+    "camera-slam-right": (10.0, 30.0),
+    "camera-et-left": (30.0, 90.0),
+    "camera-et-right": (30.0, 90.0),
+    "imu-right": (850.0, 1150.0),
+    "imu-left": (680.0, 920.0),
+    "mag0": (7.0, 13.0),
+    "baro0": (35.0, 65.0),
+}
+HEALTHCHECK_DURATION_SECONDS = 30.0
+HEALTHCHECK_OUTPUT_DIR = BASE_DIR / "healthcheck_out"
+HEALTHCHECK_MAX_LIVE_SKEW_MS = 100.0
+HEALTHCHECK_RATE_TOLERANCE = 0.10
+
+# Energy audit (energy_detector.py, energy_estimator.py, roomscan.py, energy_report.py)
+ENERGY_YOLO_WEIGHTS = "yolov8n.pt"
+# 0.5 verified on sample.vrs: keeps real TV (0.94) / clock (0.75), rejects a
+# dark-armchair-as-TV false positive (0.44).
+ENERGY_DETECT_CONFIDENCE = 0.5
+# RGB frames are sampled at this rate (device time) for detection; the camera
+# runs faster but per-frame YOLO on every frame buys nothing for a room scan.
+ENERGY_FRAME_SAMPLE_HZ = 2.0
+# Minimum box area as a fraction of the frame; rejects sliver false positives.
+ENERGY_MIN_BOX_AREA_FRAC = 0.001
+# COCO classes treated as energy-drawing appliances. Keys are exact YOLO/COCO
+# class names; per-class typical draw and daily usage assumptions drive the
+# kWh estimate (hackathon-grade priors, not measurements).
+ENERGY_CATALOG = {
+    "tv": {"display": "Television", "watts_active": 100.0, "watts_standby": 2.0, "hours_per_day": 5.0},
+    "laptop": {"display": "Laptop", "watts_active": 50.0, "watts_standby": 1.0, "hours_per_day": 6.0},
+    "refrigerator": {"display": "Refrigerator", "watts_active": 150.0, "watts_standby": 0.0, "hours_per_day": 8.0},
+    "microwave": {"display": "Microwave", "watts_active": 1100.0, "watts_standby": 3.0, "hours_per_day": 0.25},
+    "oven": {"display": "Oven", "watts_active": 2300.0, "watts_standby": 2.0, "hours_per_day": 0.5},
+    "toaster": {"display": "Toaster", "watts_active": 900.0, "watts_standby": 0.0, "hours_per_day": 0.1},
+    "hair drier": {"display": "Hair dryer", "watts_active": 1500.0, "watts_standby": 0.0, "hours_per_day": 0.1},
+    "cell phone": {"display": "Phone (charging)", "watts_active": 5.0, "watts_standby": 0.5, "hours_per_day": 2.0},
+    "clock": {"display": "Clock", "watts_active": 2.0, "watts_standby": 0.0, "hours_per_day": 24.0},
+}
+ENERGY_COST_PER_KWH_USD = 0.17
+ROOMSCAN_OUTPUT_DIR = BASE_DIR / "roomscan_out"
+ROOMSCAN_REPORT_JSON_NAME = "roomscan_report.json"
+ROOMSCAN_REPORT_HTML_NAME = "roomscan_report.html"
+ROOMSCAN_CROP_DIR_NAME = "crops"
+# Live mode scans for this long by default; VRS mode consumes the whole file.
+ROOMSCAN_LIVE_DURATION_SECONDS = 60.0
+
 
 if __name__ == "__main__":
     print(f"Aria ML config loaded from {BASE_DIR}")

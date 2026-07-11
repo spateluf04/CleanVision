@@ -199,6 +199,54 @@ ARIA_CAMERA_CALIBRATION_PATH = BASE_DIR / "aria_camera_calibration.json"
 UNDISTORT_FOCAL_SCALE = 0.72
 UNDISTORT_DISTORTION = (0.18, 0.05, 0.0, 0.0)
 
+# Capture / healthcheck (aria_capture.py, capture_healthcheck.py)
+CAPTURE_SOURCE_VRS = "vrs"
+CAPTURE_SOURCE_LIVE = "live"
+# Canonical stream labels consumers subscribe to. The Gen 1 eye-tracking camera
+# is ONE physical stream ("camera-et") holding both eyes side by side; capture
+# splits it into the two camera-et-* labels below.
+CAPTURE_IMAGE_LABELS = (
+    "camera-rgb",
+    "camera-slam-left",
+    "camera-slam-right",
+    "camera-et-left",
+    "camera-et-right",
+)
+CAPTURE_MOTION_LABELS = ("imu-right", "imu-left", "mag0", "baro0")
+CAPTURE_ALL_LABELS = CAPTURE_IMAGE_LABELS + CAPTURE_MOTION_LABELS
+CAPTURE_ET_COMBINED_LABEL = "camera-et"
+# VRS label aliases per physical stream (labels vary slightly across firmware
+# and tooling versions; resolution is by label, never by hardcoded stream id).
+CAPTURE_VRS_LABEL_ALIASES = {
+    "camera-rgb": tuple(RGB_LABEL_CANDIDATES),
+    "camera-slam-left": ("camera-slam-left", "slam-left"),
+    "camera-slam-right": ("camera-slam-right", "slam-right"),
+    CAPTURE_ET_COMBINED_LABEL: ("camera-et", "camera-eyetracking", "camera-et-left"),
+    "imu-right": ("imu-right",),
+    "imu-left": ("imu-left",),
+    "mag0": ("mag0", "magnetometer"),
+    "baro0": ("baro0", "barometer"),
+}
+CAPTURE_MOTION_DEQUE_MAXLEN = 2000
+CAPTURE_DISPATCH_IDLE_SLEEP_SECONDS = 0.001
+CAPTURE_VRS_BACKPRESSURE_SLEEP_SECONDS = 0.002
+# Nominal per-stream rate windows (Hz) for the Aria Gen 1 sensors.
+EXPECTED_STREAM_RATES_HZ = {
+    "camera-rgb": (10.0, 30.0),
+    "camera-slam-left": (10.0, 30.0),
+    "camera-slam-right": (10.0, 30.0),
+    "camera-et-left": (30.0, 90.0),
+    "camera-et-right": (30.0, 90.0),
+    "imu-right": (850.0, 1150.0),
+    "imu-left": (680.0, 920.0),
+    "mag0": (7.0, 13.0),
+    "baro0": (35.0, 65.0),
+}
+HEALTHCHECK_DURATION_SECONDS = 30.0
+HEALTHCHECK_OUTPUT_DIR = BASE_DIR / "healthcheck_out"
+HEALTHCHECK_MAX_LIVE_SKEW_MS = 100.0
+HEALTHCHECK_RATE_TOLERANCE = 0.10
+
 
 if __name__ == "__main__":
     print(f"Aria ML config loaded from {BASE_DIR}")

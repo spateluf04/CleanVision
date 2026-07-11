@@ -115,6 +115,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-streaming", action="store_true", help="Live mode: start streaming via DeviceClient first.")
     parser.add_argument("--interface", choices=["wifi", "usb"], default="wifi", help="Live streaming interface for --start-streaming.")
     parser.add_argument("--profile", default=DEFAULT_STREAM_PROFILE, help="Live streaming profile for --start-streaming.")
+    parser.add_argument("--persistent-certs", action="store_true", help="Use installed persistent streaming certificates (via `aria streaming install-certs`) instead of ephemeral certificates.")
+    parser.add_argument("--local-certs-dir", help="Optional persistent-cert directory override (only with --persistent-certs).")
     parser.add_argument("--duration", type=float, default=HEALTHCHECK_DURATION_SECONDS, help="Capture window in seconds (device time for VRS, wall clock for live).")
     parser.add_argument("--out", default=str(HEALTHCHECK_OUTPUT_DIR), help="Directory for sample frames.")
     return parser.parse_args()
@@ -134,7 +136,7 @@ def print_calibration_summary(capture: AriaCapture) -> None:
         principal = calib.get_principal_point()
         size = calib.get_image_size()
         print(
-            f"  {label:20s} model={calib.get_model_name()} "
+            f"  {label:20s} model={calib.model_name()} "
             f"focal=({focal[0]:.2f}, {focal[1]:.2f}) "
             f"principal=({principal[0]:.2f}, {principal[1]:.2f}) "
             f"size={int(size[0])}x{int(size[1])}"
@@ -172,6 +174,8 @@ def run_healthcheck(args: argparse.Namespace) -> int:
             start_streaming=args.start_streaming,
             streaming_interface=args.interface,
             profile_name=args.profile,
+            use_ephemeral_certs=not args.persistent_certs,
+            local_certs_dir=args.local_certs_dir,
         )
     else:
         capture = AriaCapture(source=CAPTURE_SOURCE_VRS, vrs_path=args.vrs)

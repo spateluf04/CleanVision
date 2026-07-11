@@ -205,6 +205,13 @@ class AriaCapture:
         self.available_vrs_labels: List[str] = []
         self.missing_expected_labels: List[str] = []
 
+        # Set by the live observer's on_streaming_client_failure (SDK thread);
+        # read by pull-style consumers like LiveScanController.last_error() so
+        # a subscription failure can surface in a UI poll loop instead of only
+        # ever reaching the log.
+        self._last_error_lock = threading.Lock()
+        self._last_error: Optional[str] = None
+
         # VRS state
         self._provider = None
         self._label_to_stream_id: Dict[str, Any] = {}
@@ -278,6 +285,15 @@ class AriaCapture:
         VRS recording or factory calibration JSON in a later build.
         """
         return self._calibrations.get(label)
+
+    def _set_last_error(self, message: str) -> None:
+        with self._last_error_lock:
+            self._last_error = message
+
+    def last_error(self) -> Optional[str]:
+        """Return the most recent live streaming-client failure message, if any."""
+        with self._last_error_lock:
+            return self._last_error
 
     def latest(self, stream_label: str) -> Optional[Any]:
         """Return the most recent sample for a label without consuming it."""
@@ -441,7 +457,7 @@ class AriaCapture:
             logger.info(
                 "Calibration %s: model=%s focal=(%.2f, %.2f) principal=(%.2f, %.2f)",
                 label,
-                cam_calib.get_model_name(),
+                cam_calib.model_name(),
                 focal[0],
                 focal[1],
                 principal[0],
@@ -595,6 +611,14 @@ class AriaCapture:
             if self.local_certs_dir:
                 streaming_config.security_options.local_certs_root_path = self.local_certs_dir
             self._streaming_manager.streaming_config = streaming_config
+            try:
+                # Clear a stale session left by a previous run/crash -- without
+                # this, start_streaming() can fail or hang (same fix as bridge.py).
+                self._streaming_manager.stop_streaming()
+                time.sleep(1.0)
+                logger.info("Stopped any existing Aria stream before starting a new one.")
+            except Exception as exc:
+                logger.warning("No existing stream stopped before start: %s", exc)
             self._streaming_manager.start_streaming()
             self._started_streaming_internally = True
             logger.info("Started streaming via DeviceClient (%s / %s).", self.streaming_interface, self.profile_name)
@@ -659,6 +683,7 @@ class _LiveObserver:
 
     def __init__(self, capture: AriaCapture) -> None:
         self._capture = capture
+        self._logged_first_rgb = False
 
     def on_image_received(self, image: np.ndarray, record: Any) -> None:
         aria = self._capture._aria_sdk
@@ -666,6 +691,15 @@ class _LiveObserver:
         camera_id = record.camera_id
         if camera_id == aria.CameraId.Rgb:
             # Live RGB frames arrive as 8-bit RGB.
+            if not self._logged_first_rgb:
+                logger.info(
+                    "First camera-rgb frame received from Aria SDK (shape=%s, ts_ns=%d).",
+                    image.shape,
+                    ts_ns,
+                )
+                self._logged_first_rgb = True
+            else:
+                logger.debug("camera-rgb frame received from Aria SDK (ts_ns=%d).", ts_ns)
             self._capture._emit_image("camera-rgb", image, PIXEL_FORMAT_RGB, ts_ns)
         elif camera_id == aria.CameraId.Slam1:
             self._capture._emit_image("camera-slam-left", image, PIXEL_FORMAT_GRAY, ts_ns)
@@ -709,3 +743,4 @@ class _LiveObserver:
 
     def on_streaming_client_failure(self, reason: Any, message: str) -> None:
         logger.error("Streaming client failure (%s): %s", reason, message)
+        self._capture._set_last_error(f"{reason}: {message}")

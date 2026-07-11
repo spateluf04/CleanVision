@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Meta Project Aria Gen 1 air-writing recognition toolkit, plus a newer Aria-based "energy project" data-capture foundation. Two independent subsystems share the same repo, config, and logging conventions:
 
 1. **Air-writing pipeline**: VRS/live capture of the index fingertip -> normalized 2D trajectories -> LSTM/Transformer or EMNIST-CNN classifier -> live letter prediction, with a PyQt5 dashboard for collection/review/training.
-2. **`aria_capture.py` / `capture_healthcheck.py`**: a newer, general-purpose dual-backend (VRS + live) sensor capture layer with a ring-buffered fan-out, built as the foundation for future (not-yet-built) energy-related work. Capture-and-verify only — no dashboard/YOLO/energy logic lives here yet.
+2. **RoomScan energy audit**: `aria_capture.py` (dual-backend VRS + live sensor capture with ring-buffered fan-out) + `capture_healthcheck.py` (verification harness), consumed by the energy pipeline: `energy_detector.py` (YOLOv8 appliance detection) -> `energy_estimator.py` (catalog kWh/cost math) -> `roomscan.py` (orchestrator CLI) -> `energy_report.py` (self-contained HTML report).
 
 Primary runtime is a Mac (`~/aria-venv`, Aria SDK paired to the glasses there). On Windows, there is no native Python and `projectaria_tools`/`aria.sdk` have no Windows wheels — use WSL Ubuntu instead (see below).
 
@@ -84,6 +84,16 @@ python3 capture_healthcheck.py --live [--start-streaming --device-ip <ip> --inte
 ```
 Exit code 0 only if every expected stream (camera-rgb, camera-slam-left/right, camera-et-left/right, imu-right, imu-left, mag0, baro0) is alive and timestamp-monotonic (plus, in live mode, RGB/IMU skew < 100 ms). Writes one upright sample JPEG per camera to `healthcheck_out/` for visual orientation/eye-split verification.
 
+### RoomScan energy audit
+
+```bash
+python3 roomscan.py --vrs /path/to/walkthrough.vrs --room-name "Living room" [--out roomscan_out]
+python3 roomscan.py --live [--start-streaming --device-ip <ip> --interface usb|wifi] [--duration 60]
+python3 energy_report.py --json roomscan_out/roomscan_report.json   # regenerate HTML only
+python3 energy_detector.py --vrs /path/to/recording.vrs             # detection-only debug scan
+```
+Requires `ultralytics` (auto-downloads `yolov8n.pt` on first run; gitignored via `*.pt`). Outputs `roomscan_report.json`, per-instance crops, and a self-contained `roomscan_report.html` (base64-inlined crops — openable anywhere with no server). Exit 0 if appliances were found, 2 if none, per `roomscan.py:main()`.
+
 ## Architecture
 
 ### Shared foundations
@@ -103,7 +113,11 @@ Single `AriaCapture` class, two backends behind one callback interface (`source=
 - **Fan-out**: producer threads only write buffers (single-slot latest-value for images, `deque(maxlen=2000)` for IMU/mag/baro) — one dispatcher thread invokes subscriber callbacks, so a slow subscriber can never block capture.
 - `get_calibration(label)` returns `CameraCalibration` from `provider.get_device_calibration()` in VRS mode; always `None` in live mode (the Client SDK streaming path doesn't deliver device calibration in this build).
 
-`capture_healthcheck.py` is the verification harness for this layer — it is deliberately capture-only, with no downstream consumers wired up yet.
+`capture_healthcheck.py` is the verification harness for this layer.
+
+### Energy audit pipeline (`roomscan.py` and friends)
+
+`roomscan.py` orchestrates: `AriaCapture` (either backend) -> `energy_detector.scan_capture_rgb()` subscribes to camera-rgb, samples frames at ~2 Hz **device time**, rotates RAW frames upright before YOLO -> `ApplianceScanAggregator` counts instances with the **max-simultaneous rule** (per class, count = most detections seen in any single frame; pan-away/pan-back never double-counts) and keeps the best-confidence crop per instance slot -> `energy_estimator.estimate_room()` maps counts through `ENERGY_CATALOG` priors -> `energy_report.render_html()` writes the self-contained page. Two subtleties: (1) in VRS mode `scan_capture_rgb(pace_playback=True)` subscribes a no-op imu-right consumer to engage the capture layer's backpressure — without it, faster-than-realtime playback plus the drop-stale image slot starves slow YOLO inference down to a few frames per file; live mode must keep `pace_playback=False` (drop-stale is correct there). (2) `ApplianceScanAggregator` and `energy_estimator` are deliberately torch-free (ultralytics is lazily imported inside `EnergyDetector`) so `tests/test_energy.py` runs without YOLO.
 
 ### VRS/trajectory pipeline (`vrs_index_fingertip_tracker.py`)
 

@@ -46,6 +46,7 @@ from config import (
     GEMINI_MAX_RECOMMENDATIONS,
     GEMINI_MODEL,
     GEMINI_NOTE_MAX_CHARS,
+    GEMINI_RECLASSIFIABLE_CLASSES,
     GEMINI_TIMEOUT_SECONDS,
 )
 from energy_recommendations import generate_recommendations
@@ -214,7 +215,7 @@ confident the detector mislabeled the object (e.g. an armchair labeled "tv"). If
 say it matches -- false rejections are worse than a missed catch. Whether or not it matches, if \
 you can tell a more specific type/model/size detail from the photo (e.g. "55-inch wall-mounted \
 LED TV", "13-inch silver laptop"), include it as a short "note" string; omit "note" (or leave it \
-empty) if you can't tell anything more specific than the label already says.
+empty) if you can't tell anything more specific than the label already says.{reclassify_instruction}
 Candidates (index: detector label):
 {candidate_list}
 
@@ -223,10 +224,55 @@ Candidates (index: detector label):
 Appliance types already tracked (do not list these again as discovered): {known_names}
 
 Respond with ONLY a JSON object of this exact shape:
-{{"verifications": [{{"index": 0, "matches": true, "note": "..."}}], "discovered": [{{"name": "...", \
-"description": "...", "estimated_watts": 10, "estimated_hours_per_day": 4, "count": 1}}]}}
-Include a "verifications" entry only for candidates you have an opinion on. Return at most \
-{max_discovered} "discovered" entries. No markdown, no numbering, no commentary outside the JSON object."""
+{{"verifications": [{{"index": 0, "matches": true, "note": "...", "refined_class": "monitor"}}], \
+"discovered": [{{"name": "...", "description": "...", "estimated_watts": 10, "estimated_hours_per_day": 4, \
+"count": 1}}]}}
+Include a "verifications" entry only for candidates you have an opinion on. Only include "refined_class" \
+when confident and only using one of the allowed values named above for that candidate's label -- omit it \
+entirely otherwise. Return at most {max_discovered} "discovered" entries. No markdown, no numbering, no \
+commentary outside the JSON object."""
+
+# Per-original-class hints for the VERIFY reclassification instruction, keyed
+# by the same YOLO/COCO class names as config.GEMINI_RECLASSIFIABLE_CLASSES.
+# Kept separate from the config mapping (which only says WHAT it can become)
+# so the config stays a plain data table and the visual-distinction guidance
+# lives here with the rest of the prompt-building logic.
+_RECLASSIFY_HINTS = {
+    "tv": (
+        "a desktop computer monitor is typically smaller, sits on a desk facing a keyboard/chair, and "
+        "often shows a computer desktop or application UI, while a television is usually larger, "
+        "wall-mounted or on a media stand, and faces a couch or seating area"
+    ),
+}
+
+
+def _reclassify_instruction(verify_candidates: List[VerifyCandidate]) -> str:
+    """Build the optional VERIFY paragraph telling Gemini which candidate \
+    labels can be refined into a more specific class (e.g. "tv" -> "monitor"), \
+    and how to visually tell them apart -- omitted entirely when none of this \
+    pass's candidates have a reclassification target, so the prompt doesn't \
+    carry irrelevant instructions on a pass with no "tv" candidates."""
+    present_classes = {class_name for class_name, _slot_index, _confidence, _crop in verify_candidates}
+    applicable = {
+        class_name: targets
+        for class_name, targets in GEMINI_RECLASSIFIABLE_CLASSES.items()
+        if class_name in present_classes
+    }
+    if not applicable:
+        return ""
+    clauses = []
+    for class_name, targets in applicable.items():
+        hint = _RECLASSIFY_HINTS.get(class_name, "")
+        hint_suffix = f" ({hint})" if hint else ""
+        clauses.append(
+            f'a candidate labeled "{class_name}" may actually be {" or ".join(targets)}{hint_suffix}'
+        )
+    return (
+        " Additionally, for candidates where the label looks technically correct but a more specific "
+        "type applies -- " + "; ".join(clauses) + " -- include that more specific type as a "
+        '"refined_class" string field on that verification entry, using exactly one of the allowed '
+        "values named above. Omit \"refined_class\" whenever you aren't confident."
+    )
 
 
 def _bulb_type_default_watts(description: str) -> Optional[float]:
@@ -284,6 +330,7 @@ def _build_live_pass_prompt(
     )
     return _LIVE_PASS_PROMPT_TEMPLATE.format(
         candidate_list=candidate_list,
+        reclassify_instruction=_reclassify_instruction(verify_candidates),
         discover_instruction=discover_instruction,
         known_names=", ".join(known_display_names) or "(none)",
         max_discovered=GEMINI_MAX_DISCOVERED,
@@ -314,10 +361,14 @@ def run_live_scan_pass(
     ``discovery_frame_rgb`` is the latest full upright RGB frame, or None to
     skip discovery entirely (e.g. no frame available yet).
 
-    Returns {"verifications": [(class_name, slot_index, confidence, accepted, note)],
+    Returns {"verifications": [(class_name, slot_index, confidence, accepted, note, refined_class)],
     "discovered": [{"name": str, "description": str, "watts_active": float,
     "hours_per_day": float, "count": int}]}. ``note`` is an optional short
     type/model detail string, or None if Gemini didn't offer one.
+    ``refined_class`` is an optional more-specific class name (e.g. "monitor"
+    for a "tv" candidate that's visually a desktop monitor), or None if Gemini
+    didn't offer one or the value wasn't one of ``class_name``'s allowed
+    targets in config.GEMINI_RECLASSIFIABLE_CLASSES.
     ``watts_active``/``hours_per_day`` are Gemini's vision-estimated typical
     per-unit draw/usage for a discovered non-catalog device, and ``count`` is
     how many individual instances of that exact type Gemini reports seeing in
@@ -355,7 +406,7 @@ def run_live_scan_pass(
         logger.warning("Gemini live-scan pass response was not a JSON object: %r", text)
         return empty
 
-    verifications: List[Tuple[str, int, float, bool, Optional[str]]] = []
+    verifications: List[Tuple[str, int, float, bool, Optional[str], Optional[str]]] = []
     raw_verifications = parsed.get("verifications")
     for item in raw_verifications if isinstance(raw_verifications, list) else []:
         if not isinstance(item, dict):
@@ -368,7 +419,14 @@ def run_live_scan_pass(
         note = note.strip()[:GEMINI_NOTE_MAX_CHARS] if isinstance(note, str) and note.strip() else None
         if 0 <= index < len(verify_candidates):
             class_name, slot_index, confidence, _crop = verify_candidates[index]
-            verifications.append((class_name, slot_index, confidence, matches, note))
+            refined_class_raw = item.get("refined_class")
+            refined_class = (
+                refined_class_raw.strip()
+                if isinstance(refined_class_raw, str)
+                and refined_class_raw.strip() in GEMINI_RECLASSIFIABLE_CLASSES.get(class_name, [])
+                else None
+            )
+            verifications.append((class_name, slot_index, confidence, matches, note, refined_class))
 
     discovered: List[Dict[str, str]] = []
     # Pre-seed with already-known display names (case-insensitive) so a

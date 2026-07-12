@@ -152,6 +152,16 @@ class BuildLivePassPromptTests(unittest.TestCase):
         self.assertIn("wall outlet", prompt)
         self.assertIn("Wall Outlet", prompt)
 
+    def test_reclassify_instruction_present_when_tv_candidate_included(self) -> None:
+        prompt = _build_live_pass_prompt([("tv", 0, 0.6, crop(1))], ["TV"], discover=True)
+        self.assertIn("Additionally, for candidates", prompt)
+        self.assertIn('labeled "tv" may actually be monitor', prompt)
+        self.assertIn("desktop computer monitor is typically smaller", prompt)
+
+    def test_reclassify_instruction_absent_without_a_reclassifiable_candidate(self) -> None:
+        prompt = _build_live_pass_prompt([("laptop", 0, 0.6, crop(1))], ["TV"], discover=True)
+        self.assertNotIn("Additionally, for candidates", prompt)
+
 
 class RunLiveScanPassTests(unittest.TestCase):
     def test_nothing_to_ask_short_circuits_without_key_check(self) -> None:
@@ -211,7 +221,7 @@ class RunLiveScanPassTests(unittest.TestCase):
                 result = run_live_scan_pass(candidates, None, [])
         self.assertEqual(
             result["verifications"],
-            [("tv", 0, 0.4, False, None), ("laptop", 2, 0.6, True, None)],
+            [("tv", 0, 0.4, False, None, None), ("laptop", 2, 0.6, True, None, None)],
         )
         self.assertEqual(result["discovered"], [])
 
@@ -229,8 +239,8 @@ class RunLiveScanPassTests(unittest.TestCase):
             with mock.patch("energy_gemini._generate_content", return_value=json.dumps(canned)):
                 result = run_live_scan_pass(candidates, None, [])
         verifications = result["verifications"]
-        self.assertEqual(verifications[0], ("tv", 0, 0.4, True, "55-inch wall-mounted LED TV"))
-        self.assertEqual(verifications[1], ("laptop", 2, 0.6, True, "x" * config.GEMINI_NOTE_MAX_CHARS))
+        self.assertEqual(verifications[0], ("tv", 0, 0.4, True, "55-inch wall-mounted LED TV", None))
+        self.assertEqual(verifications[1], ("laptop", 2, 0.6, True, "x" * config.GEMINI_NOTE_MAX_CHARS, None))
 
     def test_blank_or_missing_note_normalizes_to_none(self) -> None:
         candidates = [("tv", 0, 0.4, crop(1))]
@@ -241,7 +251,40 @@ class RunLiveScanPassTests(unittest.TestCase):
         with mock.patch.dict("os.environ", {GEMINI_API_KEY_ENV_VAR: "fake-key"}):
             with mock.patch("energy_gemini._generate_content", return_value=json.dumps(canned)):
                 result = run_live_scan_pass(candidates, None, [])
-        self.assertEqual(result["verifications"], [("tv", 0, 0.4, True, None)])
+        self.assertEqual(result["verifications"], [("tv", 0, 0.4, True, None, None)])
+
+    def test_valid_refined_class_is_kept(self) -> None:
+        candidates = [("tv", 0, 0.4, crop(1))]
+        canned = {
+            "verifications": [{"index": 0, "matches": True, "refined_class": "monitor"}],
+            "discovered": [],
+        }
+        with mock.patch.dict("os.environ", {GEMINI_API_KEY_ENV_VAR: "fake-key"}):
+            with mock.patch("energy_gemini._generate_content", return_value=json.dumps(canned)):
+                result = run_live_scan_pass(candidates, None, [])
+        self.assertEqual(result["verifications"], [("tv", 0, 0.4, True, None, "monitor")])
+
+    def test_refined_class_not_in_allowed_targets_is_dropped(self) -> None:
+        candidates = [("tv", 0, 0.4, crop(1))]
+        canned = {
+            "verifications": [{"index": 0, "matches": True, "refined_class": "toaster"}],
+            "discovered": [],
+        }
+        with mock.patch.dict("os.environ", {GEMINI_API_KEY_ENV_VAR: "fake-key"}):
+            with mock.patch("energy_gemini._generate_content", return_value=json.dumps(canned)):
+                result = run_live_scan_pass(candidates, None, [])
+        self.assertEqual(result["verifications"], [("tv", 0, 0.4, True, None, None)])
+
+    def test_refined_class_ignored_for_non_reclassifiable_class(self) -> None:
+        candidates = [("laptop", 0, 0.4, crop(1))]
+        canned = {
+            "verifications": [{"index": 0, "matches": True, "refined_class": "monitor"}],
+            "discovered": [],
+        }
+        with mock.patch.dict("os.environ", {GEMINI_API_KEY_ENV_VAR: "fake-key"}):
+            with mock.patch("energy_gemini._generate_content", return_value=json.dumps(canned)):
+                result = run_live_scan_pass(candidates, None, [])
+        self.assertEqual(result["verifications"], [("laptop", 0, 0.4, True, None, None)])
 
     def test_discovered_dedup_against_known_display_names(self) -> None:
         canned = {

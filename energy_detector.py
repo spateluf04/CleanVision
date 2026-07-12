@@ -113,6 +113,13 @@ class _CropSlot:
     gemini_rejected: bool = False
     gemini_checked_confidence: Optional[float] = None
     gemini_note: Optional[str] = None
+    # More-specific class Gemini's VERIFY pass assigned this slot (e.g. "tv" ->
+    # "monitor"), or None if never reclassified. counts()/best_crops()/
+    # best_confidences()/best_notes() group by this (falling back to the raw
+    # dict key) instead of the raw YOLO class name, so a reclassified slot's
+    # contribution moves to its new class everywhere a caller reads it. Reset
+    # alongside the other Gemini fields on crop replacement (see observe_frame).
+    reclassified_class: Optional[str] = None
 
 
 class ApplianceScanAggregator:
@@ -157,45 +164,63 @@ class ApplianceScanAggregator:
                         slots[i].gemini_rejected = False
                         slots[i].gemini_checked_confidence = None
                         slots[i].gemini_note = None
+                        slots[i].reclassified_class = None
                         if frame_rgb is not None:
                             slots[i].crop_rgb = _extract_crop(frame_rgb, det.box_xyxy)
 
     def counts(self) -> Dict[str, int]:
         """{class_name: max simultaneous detections seen in one frame}, excluding
-        slots Gemini has rejected as a misclassification (see record_gemini_verdict)."""
+        slots Gemini has rejected as a misclassification (see record_gemini_verdict).
+        A slot Gemini reclassified (e.g. "tv" -> "monitor") is counted under its
+        new class, not the raw YOLO label it started as."""
         with self._lock:
             result: Dict[str, int] = {}
             for name, slots in self._slots.items():
-                n = sum(1 for s in slots if not s.gemini_rejected)
-                if n:
-                    result[name] = n
+                for s in slots:
+                    if s.gemini_rejected:
+                        continue
+                    key = s.reclassified_class or name
+                    result[key] = result.get(key, 0) + 1
             return result
 
     def best_crops(self) -> Dict[str, List[np.ndarray]]:
         """Per class, one best-confidence RGB crop per counted instance slot
-        (Gemini-rejected slots excluded, matching counts())."""
+        (Gemini-rejected slots excluded, matching counts(); reclassified slots
+        grouped under their new class, also matching counts()). Every raw
+        class_name key is still present (possibly with an empty list) even if
+        all its slots were rejected or moved to a different class -- same
+        contract as before reclassification support existed."""
         with self._lock:
-            return {
-                name: [s.crop_rgb for s in slots if s.crop_rgb is not None and not s.gemini_rejected]
-                for name, slots in self._slots.items()
-            }
+            result: Dict[str, List[np.ndarray]] = {name: [] for name in self._slots}
+            for name, slots in self._slots.items():
+                for s in slots:
+                    if s.crop_rgb is None or s.gemini_rejected:
+                        continue
+                    result.setdefault(s.reclassified_class or name, []).append(s.crop_rgb)
+            return result
 
     def best_confidences(self) -> Dict[str, List[float]]:
         with self._lock:
-            return {
-                name: [round(s.confidence, 3) for s in slots if not s.gemini_rejected]
-                for name, slots in self._slots.items()
-            }
+            result: Dict[str, List[float]] = {name: [] for name in self._slots}
+            for name, slots in self._slots.items():
+                for s in slots:
+                    if s.gemini_rejected:
+                        continue
+                    result.setdefault(s.reclassified_class or name, []).append(round(s.confidence, 3))
+            return result
 
     def best_notes(self) -> Dict[str, List[Optional[str]]]:
         """Per class, one Gemini type/model note per counted instance slot
         (None where Gemini hasn't verified the slot or gave no note),
-        same order/filtering as best_confidences()/best_crops()."""
+        same order/filtering/grouping as best_confidences()/best_crops()."""
         with self._lock:
-            return {
-                name: [s.gemini_note for s in slots if not s.gemini_rejected]
-                for name, slots in self._slots.items()
-            }
+            result: Dict[str, List[Optional[str]]] = {name: [] for name in self._slots}
+            for name, slots in self._slots.items():
+                for s in slots:
+                    if s.gemini_rejected:
+                        continue
+                    result.setdefault(s.reclassified_class or name, []).append(s.gemini_note)
+            return result
 
     def unverified_slots(self) -> List[Tuple[str, int, float, Optional[np.ndarray]]]:
         """Every ``(class_name, slot_index, confidence, crop_rgb)`` slot whose
@@ -224,13 +249,17 @@ class ApplianceScanAggregator:
         expected_confidence: float,
         accepted: bool,
         note: Optional[str] = None,
+        reclassified_class: Optional[str] = None,
     ) -> bool:
         """Compare-and-swap write of a Gemini verify verdict onto one crop slot.
 
         ``note`` is an optional short type/model detail (e.g. "55-inch
         wall-mounted LED TV") Gemini attached while verifying -- purely
         descriptive, stored regardless of ``accepted`` but only surfaced via
-        best_notes() for non-rejected slots.
+        best_notes() for non-rejected slots. ``reclassified_class`` is an
+        optional more-specific class (e.g. "monitor" for a "tv" candidate) --
+        once stored, counts()/best_crops()/best_confidences()/best_notes() all
+        report this slot under the new class instead of ``class_name``.
 
         Returns False (a no-op) if the slot moved on since the caller read it
         via unverified_slots() -- a new, higher-confidence crop replaced it (or
@@ -247,6 +276,7 @@ class ApplianceScanAggregator:
             slot.gemini_checked_confidence = expected_confidence
             slot.gemini_rejected = not accepted
             slot.gemini_note = note
+            slot.reclassified_class = reclassified_class
             return True
 
     def gemini_rejected_classes(self) -> List[str]:

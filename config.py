@@ -274,6 +274,13 @@ ENERGY_DUPLICATE_BOX_IOU_THRESHOLD = 0.6     # same-frame same-class boxes above
 # kWh estimate (hackathon-grade priors, not measurements).
 ENERGY_CATALOG = {
     "tv": {"display": "Television", "watts_active": 100.0, "watts_standby": 2.0, "hours_per_day": 5.0},
+    # COCO/YOLO's "tv" class covers both actual TVs and desktop monitors with
+    # no built-in distinction; "monitor" isn't a YOLO output class, only a
+    # reclassification target the Gemini VERIFY pass can assign to a "tv"
+    # candidate (see GEMINI_RECLASSIFIABLE_CLASSES) once it visually confirms
+    # a desk monitor rather than a television -- different real-world wattage/
+    # usage-hours profile (smaller panel, but usually on far longer per day).
+    "monitor": {"display": "Computer monitor", "watts_active": 35.0, "watts_standby": 0.5, "hours_per_day": 8.0},
     "laptop": {"display": "Laptop", "watts_active": 50.0, "watts_standby": 1.0, "hours_per_day": 6.0},
     "refrigerator": {"display": "Refrigerator", "watts_active": 150.0, "watts_standby": 0.0, "hours_per_day": 8.0},
     "microwave": {"display": "Microwave", "watts_active": 1100.0, "watts_standby": 3.0, "hours_per_day": 0.25},
@@ -324,13 +331,23 @@ GEMINI_TIMEOUT_SECONDS = 12.0
 # Live-scan Gemini verification + discovery (energy_gemini.run_live_scan_pass,
 # via roomscan_live.py's background pass thread). Same GEMINI_API_KEY gate and
 # fallback-on-any-failure philosophy as the recommendations feature above --
-# see energy_gemini.py module docstring. Interval is kept comfortably above
-# GEMINI_TIMEOUT_SECONDS so a slow call never overlaps the next pass.
-GEMINI_LIVE_PASS_INTERVAL_SECONDS = 13.0
+# see energy_gemini.py module docstring. Interval is shorter than
+# GEMINI_TIMEOUT_SECONDS so a slow call CAN overlap the next tick -- that's
+# fine, _run_gemini_pass_once()'s non-blocking lock just skips a tick outright
+# rather than queuing when the previous pass is still in flight.
+GEMINI_LIVE_PASS_INTERVAL_SECONDS = 5.0
 GEMINI_VERIFY_MAX_CROPS = 4        # unverified candidates re-checked per pass
 GEMINI_MAX_DISCOVERED = 4          # AI-discovered non-catalog names accepted per pass
 GEMINI_DISCOVERY_MAX_DIM = 768     # full-frame longest-side downscale before upload
 GEMINI_NOTE_MAX_CHARS = 80         # cap on a verified slot's type/model note (UI tooltip length)
+# Classes the Gemini VERIFY pass may re-tag a candidate as, keyed by the
+# original YOLO/COCO detector class name. Only "tv" is listed today: COCO's
+# "tv" class conflates actual televisions and desktop computer monitors, and
+# this lets a visually-confirmed monitor be priced/reported under its own
+# ENERGY_CATALOG entry instead of always inheriting the TV assumptions.
+GEMINI_RECLASSIFIABLE_CLASSES = {
+    "tv": ["monitor"],
+}
 # Pricing a Gemini-discovered (non-catalog) device: Gemini is asked to also
 # estimate typical active wattage + daily usage hours per discovered item
 # (energy_gemini.run_live_scan_pass) so roomscan.py:merge_discovered_devices()

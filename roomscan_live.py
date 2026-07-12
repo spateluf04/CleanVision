@@ -274,8 +274,10 @@ class LiveScanController:
             candidates = self._aggregator.unverified_slots()[:GEMINI_VERIFY_MAX_CROPS]
             frame = self.latest_frame()
             result = run_live_scan_pass(candidates, frame, self._known_display_names())
-            for class_name, slot_index, confidence, accepted, note in result["verifications"]:
-                self._aggregator.record_gemini_verdict(class_name, slot_index, confidence, accepted, note=note)
+            for class_name, slot_index, confidence, accepted, note, refined_class in result["verifications"]:
+                self._aggregator.record_gemini_verdict(
+                    class_name, slot_index, confidence, accepted, note=note, reclassified_class=refined_class,
+                )
             if result["discovered"]:
                 with self._gemini_discovered_lock:
                     for item in result["discovered"]:

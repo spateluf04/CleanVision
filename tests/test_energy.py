@@ -174,6 +174,37 @@ class GeminiVerdictTests(unittest.TestCase):
         agg.observe_frame([det("tv", 0.9)], frame(200))  # higher confidence replaces the crop
         self.assertEqual(agg.best_notes(), {"tv": [None]})
 
+    def test_reclassified_slot_moves_to_new_class_in_counts_crops_confidences_notes(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5)], frame(10))
+        ok = agg.record_gemini_verdict(
+            "tv", 0, 0.5, accepted=True, note="27-inch desk monitor", reclassified_class="monitor",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(agg.counts(), {"monitor": 1})
+        self.assertEqual(agg.best_confidences(), {"tv": [], "monitor": [0.5]})
+        self.assertEqual(agg.best_notes(), {"tv": [], "monitor": ["27-inch desk monitor"]})
+        crops = agg.best_crops()
+        self.assertEqual(crops["tv"], [])
+        self.assertEqual(len(crops["monitor"]), 1)
+
+    def test_reclassified_slot_alongside_unreclassified_same_class_slot(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5), det("tv", 0.6)], frame(10))
+        # observe_frame() sorts same-frame detections by confidence descending
+        # before assigning slots, so slot 0 gets the 0.6 detection and slot 1
+        # gets the 0.5 one -- reclassify the lower-confidence slot (index 1).
+        agg.record_gemini_verdict("tv", 1, 0.5, accepted=True, reclassified_class="monitor")
+        self.assertEqual(agg.counts(), {"tv": 1, "monitor": 1})
+
+    def test_replacement_crop_clears_prior_reclassification(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.5)], frame(10))
+        agg.record_gemini_verdict("tv", 0, 0.5, accepted=True, reclassified_class="monitor")
+        self.assertEqual(agg.counts(), {"monitor": 1})
+        agg.observe_frame([det("tv", 0.9)], frame(200))  # higher confidence replaces the crop
+        self.assertEqual(agg.counts(), {"tv": 1})
+
 
 class DuplicateBoxSuppressionTests(unittest.TestCase):
     def test_heavily_overlapping_same_class_collapsed(self) -> None:

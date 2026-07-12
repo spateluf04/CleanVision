@@ -69,7 +69,7 @@ class RunGeminiPassOnceTests(unittest.TestCase):
         controller.feed("tv", 0.5)
         with mock.patch(
             "roomscan_live.run_live_scan_pass",
-            return_value={"verifications": [("tv", 0, 0.5, True, "55-inch LED TV")], "discovered": []},
+            return_value={"verifications": [("tv", 0, 0.5, True, "55-inch LED TV", None)], "discovered": []},
         ) as mocked:
             controller._run_gemini_pass_once()
         mocked.assert_called_once()
@@ -81,11 +81,27 @@ class RunGeminiPassOnceTests(unittest.TestCase):
         controller.feed("tv", 0.5)
         with mock.patch(
             "roomscan_live.run_live_scan_pass",
-            return_value={"verifications": [("tv", 0, 0.5, False, None)], "discovered": []},
+            return_value={"verifications": [("tv", 0, 0.5, False, None, None)], "discovered": []},
         ):
             controller._run_gemini_pass_once()
         self.assertNotIn("tv", controller._aggregator.counts())
         self.assertEqual(controller._aggregator.gemini_rejected_classes(), ["tv"])
+
+    def test_refined_class_moves_slot_to_new_class_in_counts(self) -> None:
+        controller = _make_controller()
+        controller.feed("tv", 0.5)
+        with mock.patch(
+            "roomscan_live.run_live_scan_pass",
+            return_value={
+                "verifications": [("tv", 0, 0.5, True, "27-inch desk monitor", "monitor")],
+                "discovered": [],
+            },
+        ):
+            controller._run_gemini_pass_once()
+        counts = controller._aggregator.counts()
+        self.assertNotIn("tv", counts)
+        self.assertEqual(counts.get("monitor"), 1)
+        self.assertEqual(controller._aggregator.best_notes().get("monitor"), ["27-inch desk monitor"])
 
     def test_discovered_devices_accumulate_and_sightings_increment(self) -> None:
         controller = _make_controller()
@@ -236,7 +252,7 @@ class SnapshotGeminiFieldsTests(unittest.TestCase):
         with mock.patch(
             "roomscan_live.run_live_scan_pass",
             return_value={
-                "verifications": [("tv", 0, 0.5, False, None)],
+                "verifications": [("tv", 0, 0.5, False, None, None)],
                 "discovered": [{"name": "Kettle", "description": ""}],
             },
         ):

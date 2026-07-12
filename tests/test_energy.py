@@ -701,6 +701,11 @@ class RecommendationTests(unittest.TestCase):
         suggestions = generate_recommendations([device], {"cost_per_year_usd": device["cost_per_year_usd"]})
         self.assertTrue(any("blocked by furniture" in s for s in suggestions))
 
+    def test_wall_outlet_device_flagged_as_phantom_load(self) -> None:
+        device = discovered_device("Wall Outlet", 3.0, 24.0, 1, notes=["Wall outlet with an idle phone charger plugged in"])
+        suggestions = generate_recommendations([device], {"cost_per_year_usd": device["cost_per_year_usd"]})
+        self.assertTrue(any("phantom load" in s for s in suggestions))
+
 
 class ReportRecommendationsTests(unittest.TestCase):
     def test_build_report_includes_recommendations(self) -> None:
@@ -781,7 +786,10 @@ class ReportRecommendationsTests(unittest.TestCase):
 
         agg = ApplianceScanAggregator()
         agg.observe_frame([det("refrigerator", 0.7)], frame(10))
-        discovered = [{"name": "Ceiling Light", "description": "LED ceiling light.", "watts_active": 9.0, "hours_per_day": 5.0}]
+        discovered = [
+            {"name": "Ceiling Light", "description": "LED ceiling light.", "watts_active": 9.0, "hours_per_day": 5.0},
+            {"name": "Wall Outlet", "description": "Idle charger plugged in.", "watts_active": 3.0, "hours_per_day": 24.0},
+        ]
         report = build_report("Kitchen", "test", agg, {}, 1.0, gemini_discovered_devices=discovered)
         with tempfile.TemporaryDirectory() as tmp:
             out_dir = Path(tmp)
@@ -791,6 +799,7 @@ class ReportRecommendationsTests(unittest.TestCase):
         self.assertIn("Breakdown by Category", page)
         self.assertIn("Kitchen &amp; Major Appliances", page)
         self.assertIn("Lighting", page)
+        self.assertIn("Electronics &amp; Standby", page)
 
     def test_render_html_omits_category_breakdown_when_no_devices(self) -> None:
         import tempfile

@@ -48,6 +48,7 @@ LIGHTING_KEYWORDS = ("light", "lamp", "bulb", "fixture", "chandelier", "sconce")
 MULTI_LIGHT_COUNT_THRESHOLD = 3  # >= this many instances of one discovered lighting type
 PHANTOM_LOAD_KEYWORDS = (
     "power strip", "charger", "speaker", "hub", "router", "modem", "console", "printer",
+    "outlet", "receptacle", "socket",
 )
 VENT_KEYWORDS = ("vent", "duct", "register")
 

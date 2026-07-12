@@ -78,6 +78,7 @@ _CATEGORY_KEYWORDS = [
         (
             "tv", "television", "laptop", "computer", "monitor", "cell phone", "phone", "clock",
             "speaker", "console", "router", "modem", "hub", "printer", "charger", "power strip",
+            "outlet", "receptacle", "socket",
         ),
     ),
 ]

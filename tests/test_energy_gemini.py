@@ -147,6 +147,11 @@ class BuildLivePassPromptTests(unittest.TestCase):
         self.assertIn("SAME physical object", prompt)
         self.assertIn("do NOT list it again", prompt)
 
+    def test_discover_instruction_covers_wall_outlets(self) -> None:
+        prompt = _build_live_pass_prompt([], ["TV"], discover=True)
+        self.assertIn("wall outlet", prompt)
+        self.assertIn("Wall Outlet", prompt)
+
 
 class RunLiveScanPassTests(unittest.TestCase):
     def test_nothing_to_ask_short_circuits_without_key_check(self) -> None:

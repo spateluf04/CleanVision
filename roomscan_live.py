@@ -142,6 +142,14 @@ class LiveScanController:
         # read of a bool/float is never actually observable in CPython.
         self._gemini_pass_active = False
         self._gemini_last_pass_ts: Optional[float] = None
+        # Snapshot of the exact frame + newly-identified item names from the
+        # MOST RECENT Gemini pass, for the dashboard's "here's what Gemini
+        # just looked at" panel -- distinct from _gemini_discovered (the
+        # cumulative all-session list). Guarded by _gemini_discovered_lock
+        # since both are written from the same pass and read from the Qt
+        # poll thread.
+        self._gemini_last_pass_frame: Optional[np.ndarray] = None
+        self._gemini_last_pass_new_items: List[str] = []
 
     def start(self) -> None:
         """Begin continuous live capture (+ detection, unless disabled)."""
@@ -278,6 +286,7 @@ class LiveScanController:
                 self._aggregator.record_gemini_verdict(
                     class_name, slot_index, confidence, accepted, note=note, reclassified_class=refined_class,
                 )
+            new_item_names: List[str] = []
             if result["discovered"]:
                 with self._gemini_discovered_lock:
                     for item in result["discovered"]:
@@ -304,10 +313,14 @@ class LiveScanController:
                                 "hours_per_day": item.get("hours_per_day", GEMINI_DISCOVERY_DEFAULT_HOURS_PER_DAY),
                                 "count": item.get("count", GEMINI_DISCOVERY_DEFAULT_COUNT),
                             }
+                            new_item_names.append(item["name"])
                 logger.info(
                     "Gemini live pass for room '%s' discovered/updated %d appliance type(s).",
                     self.room_name, len(result["discovered"]),
                 )
+            with self._gemini_discovered_lock:
+                self._gemini_last_pass_frame = frame
+                self._gemini_last_pass_new_items = new_item_names
         except Exception as exc:
             logger.warning("Gemini live pass tick failed unexpectedly (%s); skipping this tick.", exc)
         finally:
@@ -332,6 +345,9 @@ class LiveScanController:
         )
         merge_discovered_devices(estimate, self._gemini_discovered_list())
         watts_active_total = sum(d["watts_active"] * d["count"] for d in estimate["devices"])
+        with self._gemini_discovered_lock:
+            gemini_last_pass_frame = self._gemini_last_pass_frame
+            gemini_last_pass_new_items = list(self._gemini_last_pass_new_items)
         stabilizer = self._sample_state["stabilizer"] if self._sample_state else None
         frames_sampled = self._aggregator.frames_observed
         if not self._logged_first_snapshot_frame and frames_sampled > 0:
@@ -353,6 +369,8 @@ class LiveScanController:
             "gemini_verification_enabled": self._should_run_gemini_pass(),
             "gemini_pass_active": self._gemini_pass_active,
             "gemini_last_pass_ts": self._gemini_last_pass_ts,
+            "gemini_last_pass_frame": gemini_last_pass_frame,
+            "gemini_last_pass_new_items": gemini_last_pass_new_items,
         }
 
     def run_ticker(

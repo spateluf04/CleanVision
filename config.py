@@ -438,6 +438,12 @@ ROOMSCAN_DETECTION_BOX_THICKNESS = 2
 # how long the "Gemini AI check complete" message stays visible after a live
 # verification/discovery pass finishes, before the label hides itself again.
 ROOMSCAN_AI_FLASH_DURATION_S = 2.5
+# "Gemini's Last Look" panel (roomscan_dashboard.py, right column): a
+# thumbnail of the exact frame the most recent live Gemini pass analyzed,
+# plus a caption of anything newly identified in that pass. Sized to fit
+# inside ROOMSCAN_DASHBOARD_RIGHT_WIDTH alongside the panel's padding.
+ROOMSCAN_GEMINI_SNAPSHOT_WIDTH = 280
+ROOMSCAN_GEMINI_SNAPSHOT_HEIGHT = 158
 
 # RoomScan dashboard theme (roomscan_dashboard.py only). Deliberately separate
 # from the PANEL_BG/SURFACE_BG/ACCENT/SUCCESS/WARNING/DANGER/TEXT/MUTED/BORDER

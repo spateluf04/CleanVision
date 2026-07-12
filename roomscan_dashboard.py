@@ -72,6 +72,8 @@ from config import (
     ROOMSCAN_DETECTION_BOX_THICKNESS,
     ROOMSCAN_EFFICIENCY_FAIR_MAX_COST_USD,
     ROOMSCAN_EFFICIENCY_GOOD_MAX_COST_USD,
+    ROOMSCAN_GEMINI_SNAPSHOT_HEIGHT,
+    ROOMSCAN_GEMINI_SNAPSHOT_WIDTH,
     ROOMSCAN_LIVE_TICK_SECONDS,
     ROOMSCAN_OUTPUT_DIR,
     ROOMSCAN_REPORT_HTML_NAME,
@@ -188,6 +190,12 @@ QLabel#panelHeading {{
     color: {RS_MUTED};
     font-size: 12px;
     font-weight: 600;
+}}
+QLabel#subheading {{
+    color: {RS_MUTED};
+    font-size: 12px;
+    font-weight: 600;
+    margin-top: 6px;
 }}
 
 QWidget#meterWindow {{
@@ -461,6 +469,10 @@ class RoomScanDashboard(QMainWindow):
         # the monotonic deadline the flash message stays visible until.
         self._last_seen_gemini_pass_ts: Optional[float] = None
         self._ai_flash_until: Optional[float] = None
+        # "Gemini's Last Look" snapshot panel: tracks which gemini_last_pass_ts
+        # is currently on screen, so _update_gemini_snapshot only re-converts
+        # the frame to a QPixmap once per completed pass, not every poll tick.
+        self._last_seen_gemini_snapshot_ts: Optional[float] = None
 
         title = "RoomScan — Home Energy Scanner"
         if self._debug_camera_only:
@@ -632,6 +644,27 @@ class RoomScanDashboard(QMainWindow):
         self._watts_value = self._stat_row(layout, "Power In Use Right Now")
         self._kwh_day_value = self._stat_row(layout, "Energy Used Per Day")
         self._kwh_year_value = self._stat_row(layout, "Energy Used Per Year")
+
+        # "Gemini's Last Look": the exact frame the most recent live Gemini
+        # pass analyzed, plus what (if anything) it newly identified in that
+        # pass. Hidden until the first pass completes; _last_seen_gemini_snapshot_ts
+        # (see __init__) tracks which pass is currently displayed so
+        # _poll_stats only re-renders the pixmap when a new pass has actually
+        # landed, not on every 100ms/tick.
+        gemini_heading = QLabel("Gemini's Last Look")
+        gemini_heading.setObjectName("subheading")
+        layout.addWidget(gemini_heading)
+        self._gemini_snapshot_label = QLabel("")
+        self._gemini_snapshot_label.setAlignment(Qt.AlignCenter)
+        self._gemini_snapshot_label.setFixedSize(ROOMSCAN_GEMINI_SNAPSHOT_WIDTH, ROOMSCAN_GEMINI_SNAPSHOT_HEIGHT)
+        self._gemini_snapshot_label.setStyleSheet(f"background-color: #000; border: 1px solid {RS_BORDER};")
+        self._gemini_snapshot_label.hide()
+        layout.addWidget(self._gemini_snapshot_label)
+        self._gemini_snapshot_caption = QLabel("")
+        self._gemini_snapshot_caption.setWordWrap(True)
+        self._gemini_snapshot_caption.setStyleSheet(f"color: {RS_MUTED}; font-size: 12px;")
+        self._gemini_snapshot_caption.hide()
+        layout.addWidget(self._gemini_snapshot_caption)
         layout.addStretch(1)
         return panel
 
@@ -706,6 +739,8 @@ class RoomScanDashboard(QMainWindow):
         self._gemini_flag_label.hide()
         self._gemini_discovered_label.hide()
         self._ai_status_label.hide()
+        self._gemini_snapshot_label.hide()
+        self._gemini_snapshot_caption.hide()
 
     # ------------------------------------------------------------------
     # Scan status indicator
@@ -770,6 +805,9 @@ class RoomScanDashboard(QMainWindow):
         self._last_seen_gemini_pass_ts = None
         self._ai_flash_until = None
         self._ai_status_label.hide()
+        self._gemini_snapshot_label.hide()
+        self._gemini_snapshot_caption.hide()
+        self._last_seen_gemini_snapshot_ts = None
 
         # No frame has arrived for *this* scan yet -- replace whatever the
         # camera label was showing (pre-scan placeholder or a prior room's
@@ -1022,6 +1060,7 @@ class RoomScanDashboard(QMainWindow):
         self._update_gemini_flag(state.get("gemini_rejected_classes", []))
         self._update_gemini_discovered(state.get("gemini_discovered_devices", []))
         self._update_ai_indicator(state)
+        self._update_gemini_snapshot(state)
 
     def _update_device_table(self, devices: List[Dict[str, object]]) -> None:
         table = self._device_table
@@ -1126,6 +1165,46 @@ class RoomScanDashboard(QMainWindow):
             self._ai_status_label.show()
         else:
             self._ai_status_label.hide()
+
+    def _update_gemini_snapshot(self, state: Dict[str, object]) -> None:
+        """Show the exact frame the most recent live Gemini pass analyzed,
+        plus a caption of anything newly identified in that pass, so every
+        Gemini pass is visibly proven out with its own evidence -- not just
+        the "check complete" flash from _update_ai_indicator. Only
+        re-converts the frame to a QPixmap once per completed pass (guarded
+        by gemini_last_pass_ts), since this is read on every _poll_stats
+        tick but the frame itself only changes once every
+        GEMINI_LIVE_PASS_INTERVAL_SECONDS."""
+        if not state.get("gemini_verification_enabled"):
+            self._gemini_snapshot_label.hide()
+            self._gemini_snapshot_caption.hide()
+            return
+
+        last_ts = state.get("gemini_last_pass_ts")
+        if last_ts is None or last_ts == self._last_seen_gemini_snapshot_ts:
+            return
+        self._last_seen_gemini_snapshot_ts = last_ts
+
+        frame = state.get("gemini_last_pass_frame")
+        if frame is not None:
+            frame = np.ascontiguousarray(frame)
+            height, width, _ = frame.shape
+            qimage = QImage(frame.data, width, height, 3 * width, QImage.Format_RGB888).copy()
+            pixmap = QPixmap.fromImage(qimage).scaled(
+                ROOMSCAN_GEMINI_SNAPSHOT_WIDTH,
+                ROOMSCAN_GEMINI_SNAPSHOT_HEIGHT,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            self._gemini_snapshot_label.setPixmap(pixmap)
+            self._gemini_snapshot_label.show()
+
+        new_items = state.get("gemini_last_pass_new_items") or []
+        if new_items:
+            self._gemini_snapshot_caption.setText("New this pass: " + ", ".join(new_items))
+        else:
+            self._gemini_snapshot_caption.setText("Nothing new identified in this pass.")
+        self._gemini_snapshot_caption.show()
 
     # ------------------------------------------------------------------
 

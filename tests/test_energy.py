@@ -77,17 +77,17 @@ class AggregatorTests(unittest.TestCase):
     def test_best_crop_replaced_by_higher_confidence(self) -> None:
         agg = ApplianceScanAggregator()
         agg.observe_frame([det("tv", 0.5)], frame(10))
-        agg.observe_frame([det("tv", 0.9)], frame(200))
+        agg.observe_frame([det("tv", 0.9)], frame(12))
         crops = agg.best_crops()["tv"]
         self.assertEqual(len(crops), 1)
-        self.assertTrue((crops[0] == 200).all())
+        self.assertTrue((crops[0] == 12).all())
         self.assertEqual(agg.best_confidences()["tv"], [0.9])
 
     def test_lower_confidence_does_not_replace(self) -> None:
         agg = ApplianceScanAggregator()
-        agg.observe_frame([det("tv", 0.9)], frame(200))
+        agg.observe_frame([det("tv", 0.9)], frame(12))
         agg.observe_frame([det("tv", 0.3)], frame(10))
-        self.assertTrue((agg.best_crops()["tv"][0] == 200).all())
+        self.assertTrue((agg.best_crops()["tv"][0] == 12).all())
 
     def test_none_frame_updates_counts_without_crops(self) -> None:
         agg = ApplianceScanAggregator()
@@ -99,6 +99,23 @@ class AggregatorTests(unittest.TestCase):
         agg = ApplianceScanAggregator()
         agg.observe_frame([], frame(10))
         self.assertEqual(agg.counts(), {})
+
+    def test_visually_distinct_second_instance_across_frames_increments_count(self) -> None:
+        # Two different physical monitors, panned to one at a time -- never
+        # simultaneous in one frame, so IOU/track matching can't tell them
+        # apart. Appearance (color histogram) should: they look different,
+        # so the count grows to 2 instead of silently merging into 1.
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.6)], frame(10))
+        agg.observe_frame([det("tv", 0.7)], frame(220))
+        self.assertEqual(agg.counts(), {"tv": 2})
+
+    def test_revisiting_same_instance_after_panning_away_does_not_grow_count(self) -> None:
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("tv", 0.6)], frame(10))
+        agg.observe_frame([det("tv", 0.7)], frame(220))  # second, different-looking monitor
+        agg.observe_frame([det("tv", 0.9)], frame(10))  # pan back to the first monitor
+        self.assertEqual(agg.counts(), {"tv": 2})
 
 
 class GeminiVerdictTests(unittest.TestCase):
@@ -136,7 +153,7 @@ class GeminiVerdictTests(unittest.TestCase):
         agg.observe_frame([det("tv", 0.5)], frame(10))
         # Verdict computed against the old (0.5) confidence, but a higher-confidence
         # detection arrives before the verdict is applied.
-        agg.observe_frame([det("tv", 0.9)], frame(200))
+        agg.observe_frame([det("tv", 0.9)], frame(12))
         ok = agg.record_gemini_verdict("tv", 0, 0.5, accepted=False)
         self.assertFalse(ok)
         self.assertEqual(agg.counts(), {"tv": 1})  # rejection was never applied
@@ -147,7 +164,7 @@ class GeminiVerdictTests(unittest.TestCase):
         agg.observe_frame([det("tv", 0.5)], frame(10))
         agg.record_gemini_verdict("tv", 0, 0.5, accepted=False)
         self.assertEqual(agg.counts(), {})
-        agg.observe_frame([det("tv", 0.9)], frame(200))  # higher confidence replaces the crop
+        agg.observe_frame([det("tv", 0.9)], frame(12))  # higher confidence replaces the crop
         self.assertEqual(agg.counts(), {"tv": 1})
         self.assertEqual(agg.gemini_rejected_classes(), [])
         unverified = agg.unverified_slots()
@@ -171,7 +188,7 @@ class GeminiVerdictTests(unittest.TestCase):
         agg = ApplianceScanAggregator()
         agg.observe_frame([det("tv", 0.5)], frame(10))
         agg.record_gemini_verdict("tv", 0, 0.5, accepted=True, note="55-inch wall-mounted LED TV")
-        agg.observe_frame([det("tv", 0.9)], frame(200))  # higher confidence replaces the crop
+        agg.observe_frame([det("tv", 0.9)], frame(12))  # higher confidence replaces the crop
         self.assertEqual(agg.best_notes(), {"tv": [None]})
 
     def test_reclassified_slot_moves_to_new_class_in_counts_crops_confidences_notes(self) -> None:
@@ -202,7 +219,7 @@ class GeminiVerdictTests(unittest.TestCase):
         agg.observe_frame([det("tv", 0.5)], frame(10))
         agg.record_gemini_verdict("tv", 0, 0.5, accepted=True, reclassified_class="monitor")
         self.assertEqual(agg.counts(), {"monitor": 1})
-        agg.observe_frame([det("tv", 0.9)], frame(200))  # higher confidence replaces the crop
+        agg.observe_frame([det("tv", 0.9)], frame(12))  # higher confidence replaces the crop
         self.assertEqual(agg.counts(), {"tv": 1})
 
 

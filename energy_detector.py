@@ -32,6 +32,8 @@ from config import (
     ENERGY_DUPLICATE_BOX_IOU_THRESHOLD,
     ENERGY_FRAME_SAMPLE_HZ,
     ENERGY_MIN_BOX_AREA_FRAC,
+    ENERGY_REID_HISTOGRAM_BINS,
+    ENERGY_REID_SIMILARITY_THRESHOLD,
     ENERGY_STABILIZE_IOU_MATCH_THRESHOLD,
     ENERGY_STABILIZE_MAX_MISS_SECONDS,
     ENERGY_STABILIZE_MIN_HITS,
@@ -94,6 +96,28 @@ def _suppress_duplicate_boxes(
     return kept
 
 
+def _color_histogram(crop_rgb: np.ndarray, bins: int = ENERGY_REID_HISTOGRAM_BINS) -> np.ndarray:
+    """Per-channel color histogram, concatenated and L1-normalized to sum to 1."""
+    hist = np.concatenate(
+        [np.histogram(crop_rgb[:, :, c], bins=bins, range=(0, 256))[0] for c in range(3)]
+    ).astype(np.float64)
+    total = hist.sum()
+    return hist / total if total > 0 else hist
+
+
+def _crop_similarity(crop_a: np.ndarray, crop_b: np.ndarray) -> float:
+    """Coarse appearance similarity in [0, 1] via color-histogram intersection;
+    1.0 means near-identical color distribution, 0.0 means no overlap at all.
+
+    Cheap re-identification signal for telling "the same physical object seen
+    again" apart from "a different object of the same class" when two
+    detections are never simultaneous in one frame, so IOU/track matching
+    can't disambiguate them (see ApplianceScanAggregator.observe_frame)."""
+    hist_a = _color_histogram(crop_a)
+    hist_b = _color_histogram(crop_b)
+    return float(np.minimum(hist_a, hist_b).sum())
+
+
 @dataclass
 class _CropSlot:
     confidence: float
@@ -152,21 +176,85 @@ class ApplianceScanAggregator:
             for class_name, dets in by_class.items():
                 dets.sort(key=lambda d: d.confidence, reverse=True)
                 slots = self._slots.setdefault(class_name, [])
-                # Grow to the new simultaneous max; never shrink.
+                crops = (
+                    [_extract_crop(frame_rgb, det.box_xyxy) for det in dets]
+                    if frame_rgb is not None
+                    else [None] * len(dets)
+                )
+                # Detections within THIS frame are spatially disjoint boxes, so
+                # they are always distinct physical objects -- grow to at
+                # least this many slots before any appearance matching.
                 while len(slots) < len(dets):
                     slots.append(_CropSlot(confidence=-1.0, crop_rgb=None))  # type: ignore[arg-type]
+
+                slot_for_det = self._assign_slots(slots, crops)
+
                 for i, det in enumerate(dets):
-                    if det.confidence > slots[i].confidence:
-                        slots[i].confidence = det.confidence
+                    slot = slots[slot_for_det[i]]
+                    if det.confidence > slot.confidence:
+                        slot.confidence = det.confidence
                         # New crop pixels = an unverified candidate again; any
                         # prior Gemini verdict applied to the OLD pixels, so it
                         # must not silently carry over onto the new ones.
-                        slots[i].gemini_rejected = False
-                        slots[i].gemini_checked_confidence = None
-                        slots[i].gemini_note = None
-                        slots[i].reclassified_class = None
-                        if frame_rgb is not None:
-                            slots[i].crop_rgb = _extract_crop(frame_rgb, det.box_xyxy)
+                        slot.gemini_rejected = False
+                        slot.gemini_checked_confidence = None
+                        slot.gemini_note = None
+                        slot.reclassified_class = None
+                        if crops[i] is not None:
+                            slot.crop_rgb = crops[i]
+
+    @staticmethod
+    def _assign_slots(slots: List["_CropSlot"], crops: List[Optional[np.ndarray]]) -> List[int]:
+        """Map each detection (by index into ``crops``) to a slot index in
+        ``slots``, appending new slots to ``slots`` in place when needed.
+
+        Order of preference, one-to-one (a slot is claimed by at most one
+        detection this frame):
+        1. The existing slot whose current crop looks most similar (color
+           histogram intersection >= ENERGY_REID_SIMILARITY_THRESHOLD) --
+           "this is the same physical object seen before".
+        2. Any still-empty slot (freshly grown above, or never given a crop
+           because an earlier frame_rgb was None) -- no re-id signal needed.
+        3. Otherwise this detection doesn't resemble anything on record --
+           a genuinely new instance, so a new slot is appended.
+        """
+        assigned_slot_of_det: List[Optional[int]] = [None] * len(crops)
+        claimed_slots: set = set()
+
+        candidates: List[Tuple[float, int, int]] = []
+        for det_idx, crop in enumerate(crops):
+            if crop is None:
+                continue
+            for slot_idx, slot in enumerate(slots):
+                if slot.crop_rgb is None:
+                    continue
+                sim = _crop_similarity(crop, slot.crop_rgb)
+                if sim >= ENERGY_REID_SIMILARITY_THRESHOLD:
+                    candidates.append((sim, det_idx, slot_idx))
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        for _sim, det_idx, slot_idx in candidates:
+            if assigned_slot_of_det[det_idx] is not None or slot_idx in claimed_slots:
+                continue
+            assigned_slot_of_det[det_idx] = slot_idx
+            claimed_slots.add(slot_idx)
+
+        empty_slots = [i for i, s in enumerate(slots) if s.crop_rgb is None and i not in claimed_slots]
+        for det_idx in range(len(crops)):
+            if assigned_slot_of_det[det_idx] is not None:
+                continue
+            if empty_slots:
+                slot_idx = empty_slots.pop(0)
+                assigned_slot_of_det[det_idx] = slot_idx
+                claimed_slots.add(slot_idx)
+
+        for det_idx in range(len(crops)):
+            if assigned_slot_of_det[det_idx] is None:
+                slot_idx = len(slots)
+                slots.append(_CropSlot(confidence=-1.0, crop_rgb=None))  # type: ignore[arg-type]
+                assigned_slot_of_det[det_idx] = slot_idx
+                claimed_slots.add(slot_idx)
+
+        return assigned_slot_of_det  # type: ignore[return-value]
 
     def counts(self) -> Dict[str, int]:
         """{class_name: max simultaneous detections seen in one frame}, excluding

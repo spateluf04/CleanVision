@@ -269,6 +269,16 @@ ENERGY_STABILIZE_MIN_HITS = 2                # hits needed within the window bef
 ENERGY_STABILIZE_MAX_MISS_SECONDS = 1.5      # grace period a track survives with zero matching detections
 ENERGY_STABILIZE_IOU_MATCH_THRESHOLD = 0.3   # min IOU to match a detection to an existing track
 ENERGY_DUPLICATE_BOX_IOU_THRESHOLD = 0.6     # same-frame same-class boxes above this IOU count as one object
+
+# Appearance-based re-identification (energy_detector.ApplianceScanAggregator):
+# non-simultaneous detections of the same class (never seen in the same frame,
+# so IOU/track matching can't disambiguate them) are matched to an existing
+# instance slot by color-histogram similarity instead of always being folded
+# into whichever slot happens to be first -- otherwise panning from one
+# appliance to a second, visually distinct one of the same class (e.g. a
+# second monitor) would never grow the count past 1.
+ENERGY_REID_HISTOGRAM_BINS = 8                  # bins per color channel (coarse: robust to lighting)
+ENERGY_REID_SIMILARITY_THRESHOLD = 0.5          # histogram-intersection score below which two crops count as different objects
 # COCO classes treated as energy-drawing appliances. Keys are exact YOLO/COCO
 # class names; per-class typical draw and daily usage assumptions drive the
 # kWh estimate (hackathon-grade priors, not measurements).

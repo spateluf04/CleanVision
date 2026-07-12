@@ -2,10 +2,10 @@
 
 Drives roomscan_live.LiveScanController directly -- RoomScan's live backend
 already owns its own AriaCapture connection, so unlike bridge.py this
-dashboard does not go through a WebSocket. Reuses the dark theme palette
-(config.PANEL_BG/SURFACE_BG/ACCENT/SUCCESS/WARNING/DANGER/TEXT/MUTED/BORDER)
-already established by training_dashboard.py for visual consistency across
-the project's dashboards; panel sizes are RoomScan-specific
+dashboard does not go through a WebSocket. Uses its own "warm energy
+instrument" theme (config.RS_* tokens) rather than the blue/cyan palette
+training_dashboard.py's dark theme uses -- the two dashboards are visually
+independent, deliberately. Panel sizes are RoomScan-specific
 (config.ROOMSCAN_DASHBOARD_*) since the content differs.
 
     python roomscan_dashboard.py [--device-ip <ip> --start-streaming --interface usb --profile profile18] [--out roomscan_out]
@@ -54,13 +54,8 @@ from PyQt5.QtWidgets import (
 )
 
 from config import (
-    ACCENT,
-    BORDER,
-    DANGER,
     DEFAULT_STREAM_PROFILE,
     ENERGY_CATALOG,
-    MUTED,
-    PANEL_BG,
     ROOMSCAN_AI_FLASH_DURATION_S,
     ROOMSCAN_COMPARE_DIALOG_HEIGHT,
     ROOMSCAN_COMPARE_DIALOG_WIDTH,
@@ -86,10 +81,18 @@ from config import (
     ROOMSCAN_SUMMARY_DIALOG_WIDTH,
     ROOMSCAN_SUMMARY_RECOMMENDATIONS_COUNT,
     ROOMSCAN_TOP_DRAINS_COUNT,
-    SUCCESS,
-    SURFACE_BG,
-    TEXT,
-    WARNING,
+    RS_AMBER,
+    RS_AMBER_HOVER,
+    RS_BAD,
+    RS_BG,
+    RS_BORDER,
+    RS_GOOD,
+    RS_MONO_FONT_STACK,
+    RS_MUTED,
+    RS_SURFACE,
+    RS_SURFACE_INSET,
+    RS_TEXT,
+    RS_WARN,
 )
 from energy_recommendations import NO_DEVICES_MESSAGE, generate_recommendations
 from energy_sessions import compare_sessions, export_summary_csv, get_session, list_sessions
@@ -133,16 +136,16 @@ _STATUS_TEXT = {
     STATUS_SAVED: "Report saved",
 }
 _STATUS_COLOR = {
-    STATUS_IDLE: MUTED,
-    STATUS_CONNECTING: MUTED,
-    STATUS_WAITING: MUTED,
-    STATUS_LIVE: SUCCESS,
-    STATUS_NO_DETECTIONS: WARNING,
-    STATUS_DEBUG_CAMERA_ONLY: WARNING,
-    STATUS_STALE: WARNING,
-    STATUS_ERROR: DANGER,
-    STATUS_STOPPED: WARNING,
-    STATUS_SAVED: ACCENT,
+    STATUS_IDLE: RS_MUTED,
+    STATUS_CONNECTING: RS_MUTED,
+    STATUS_WAITING: RS_MUTED,
+    STATUS_LIVE: RS_GOOD,
+    STATUS_NO_DETECTIONS: RS_WARN,
+    STATUS_DEBUG_CAMERA_ONLY: RS_WARN,
+    STATUS_STALE: RS_WARN,
+    STATUS_ERROR: RS_BAD,
+    STATUS_STOPPED: RS_WARN,
+    STATUS_SAVED: RS_AMBER,
 }
 
 PRE_SCAN_DEVICE_MESSAGE = "Start a scan to see devices here."
@@ -154,6 +157,142 @@ WAITING_FOR_FRAME_MESSAGE = "Waiting for RGB frames..."
 CONNECTING_MESSAGE = "Connecting to live scan..."
 CAMERA_ERROR_PREFIX = "Live camera feed error:"
 NO_ROOM_NAME_WARNING = "Please enter a room name before starting a scan."
+
+# Consolidated app-wide stylesheet ("warm energy instrument" theme, config.RS_*
+# tokens). Applied once via QApplication.instance().setStyleSheet() rather than
+# on the QMainWindow itself, so it reliably cascades to the modal dialogs below
+# too (they're constructed with a parent, but a window-level setStyleSheet()
+# call doesn't cascade to QDialogs as consistently as an application-level one
+# does). objectName-keyed selectors let _panel()/_hero_stat_row()/_stat_row()
+# and the button-construction call sites opt into a role purely by name --
+# no other code here needs to touch color literals directly.
+_APP_QSS = f"""
+QMainWindow, QDialog {{
+    background-color: {RS_BG};
+    color: {RS_TEXT};
+}}
+QWidget {{
+    color: {RS_TEXT};
+    font-size: 13px;
+}}
+QLabel {{
+    border: none;
+}}
+
+QWidget#panel {{
+    background-color: {RS_SURFACE};
+    border: 1px solid {RS_BORDER};
+    border-radius: 10px;
+}}
+QLabel#panelHeading {{
+    color: {RS_MUTED};
+    font-size: 12px;
+    font-weight: 600;
+}}
+
+QWidget#meterWindow {{
+    background-color: {RS_SURFACE_INSET};
+    border: 1px solid {RS_BORDER};
+    border-top: 2px solid {RS_AMBER};
+    border-radius: 6px;
+}}
+QLabel#meterValue {{
+    color: {RS_AMBER};
+    font-family: {RS_MONO_FONT_STACK};
+    font-size: 40px;
+    font-weight: 800;
+}}
+QLabel#meterCaption {{
+    color: {RS_MUTED};
+    font-size: 12px;
+}}
+
+QLabel#statValue {{
+    color: {RS_TEXT};
+    font-family: {RS_MONO_FONT_STACK};
+    font-size: 22px;
+    font-weight: 700;
+}}
+QLabel#statCaption {{
+    color: {RS_MUTED};
+    font-size: 12px;
+}}
+
+QLineEdit {{
+    background-color: {RS_SURFACE_INSET};
+    border: 1px solid {RS_BORDER};
+    border-radius: 4px;
+    padding: 6px 8px;
+    color: {RS_TEXT};
+}}
+QLineEdit:focus {{
+    border: 1px solid {RS_AMBER};
+}}
+
+QPushButton {{
+    background-color: {RS_SURFACE_INSET};
+    border: 1px solid {RS_BORDER};
+    border-radius: 4px;
+    padding: 7px 12px;
+    color: {RS_TEXT};
+    font-weight: 600;
+}}
+QPushButton:hover {{
+    border: 1px solid {RS_AMBER};
+}}
+QPushButton:disabled {{
+    color: {RS_MUTED};
+    border: 1px solid {RS_BORDER};
+}}
+
+QPushButton#primaryButton {{
+    background-color: {RS_AMBER};
+    border: 1px solid {RS_AMBER};
+    color: {RS_SURFACE_INSET};
+}}
+QPushButton#primaryButton:hover {{
+    background-color: {RS_AMBER_HOVER};
+    border: 1px solid {RS_AMBER_HOVER};
+}}
+QPushButton#primaryButton:disabled {{
+    background-color: {RS_SURFACE_INSET};
+    color: {RS_MUTED};
+    border: 1px solid {RS_BORDER};
+}}
+
+QPushButton#ghostButton {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    color: {RS_MUTED};
+}}
+QPushButton#ghostButton:hover {{
+    color: {RS_TEXT};
+    border: 1px solid {RS_BORDER};
+}}
+
+QListWidget, QTableWidget {{
+    background-color: {RS_SURFACE_INSET};
+    border: 1px solid {RS_BORDER};
+    border-radius: 4px;
+    color: {RS_TEXT};
+}}
+QListWidget::item, QTableWidget::item {{
+    padding: 3px;
+    color: {RS_TEXT};
+}}
+QListWidget::item:selected, QTableWidget::item:selected {{
+    background-color: rgba(232, 163, 61, 60);
+    color: {RS_TEXT};
+}}
+QHeaderView::section {{
+    background-color: {RS_SURFACE};
+    color: {RS_MUTED};
+    border: none;
+    border-bottom: 1px solid {RS_BORDER};
+    padding: 4px;
+    font-weight: 600;
+}}
+"""
 
 
 def _fmt_delta(value: float, unit: str = "") -> str:
@@ -174,15 +313,15 @@ def _efficiency_rating(annual_cost_usd: float) -> Tuple[str, str]:
     -- not a measured or certified efficiency rating.
     """
     if annual_cost_usd <= ROOMSCAN_EFFICIENCY_GOOD_MAX_COST_USD:
-        return "Great efficiency", SUCCESS
+        return "Great efficiency", RS_GOOD
     if annual_cost_usd <= ROOMSCAN_EFFICIENCY_FAIR_MAX_COST_USD:
-        return "Room for improvement", WARNING
-    return "High energy use", DANGER
+        return "Room for improvement", RS_WARN
+    return "High energy use", RS_BAD
 
 
 def _placeholder_item(message: str) -> QListWidgetItem:
     item = QListWidgetItem(message)
-    item.setForeground(QColor(MUTED))
+    item.setForeground(QColor(RS_MUTED))
     return item
 
 
@@ -201,25 +340,24 @@ class RoomEfficiencySummaryDialog(QDialog):
 
         self.setWindowTitle("Room Efficiency Summary")
         self.resize(ROOMSCAN_SUMMARY_DIALOG_WIDTH, ROOMSCAN_SUMMARY_DIALOG_HEIGHT)
-        self.setStyleSheet(f"background-color: {PANEL_BG}; color: {TEXT};")
 
         layout = QVBoxLayout(self)
 
         room_label = QLabel(f"{state['room_name']}  •  {_format_duration(duration_seconds)} scan")
-        room_label.setStyleSheet(f"color: {MUTED}; font-size: 13px; border: none;")
+        room_label.setStyleSheet(f"color: {RS_MUTED}; font-size: 13px;")
         layout.addWidget(room_label)
 
         rating_text, rating_color = _efficiency_rating(totals["cost_per_year_usd"])
         rating_label = QLabel(rating_text)
-        rating_label.setStyleSheet(f"color: {rating_color}; font-size: 20px; font-weight: 700; border: none;")
+        rating_label.setStyleSheet(f"color: {rating_color}; font-size: 20px; font-weight: 700;")
         layout.addWidget(rating_label)
 
         cost_label = QLabel(f"${totals['cost_per_year_usd']:.2f} / year")
-        cost_label.setStyleSheet(f"color: {SUCCESS}; font-size: 36px; font-weight: 800; border: none;")
+        cost_label.setStyleSheet(f"color: {RS_AMBER}; font-family: {RS_MONO_FONT_STACK}; font-size: 36px; font-weight: 800;")
         layout.addWidget(cost_label)
 
         stats_label = QLabel(f"{len(devices)} device type(s) found  •  {totals['kwh_per_year']:.0f} kWh / year")
-        stats_label.setStyleSheet(f"color: {TEXT}; font-size: 13px; border: none;")
+        stats_label.setStyleSheet(f"color: {RS_TEXT}; font-size: 13px;")
         layout.addWidget(stats_label)
 
         if devices:
@@ -229,16 +367,16 @@ class RoomEfficiencySummaryDialog(QDialog):
             top_text = "No devices were detected during this scan."
         top_label = QLabel(top_text)
         top_label.setWordWrap(True)
-        top_label.setStyleSheet(f"color: {ACCENT}; font-size: 13px; font-weight: 600; border: none;")
+        top_label.setStyleSheet(f"color: {RS_AMBER}; font-size: 13px; font-weight: 600;")
         layout.addWidget(top_label)
 
         tips_heading = QLabel("Ways to save:")
-        tips_heading.setStyleSheet(f"color: {ACCENT}; font-size: 13px; font-weight: 600; border: none;")
+        tips_heading.setStyleSheet(f"color: {RS_AMBER}; font-size: 13px; font-weight: 600;")
         layout.addWidget(tips_heading)
 
         tips_list = QListWidget()
         tips_list.setWordWrap(True)
-        tips_list.setStyleSheet(f"background-color: {SURFACE_BG}; border: none;")
+        tips_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         suggestions = generate_recommendations(devices, totals, {"avg_brightness": None})
         for suggestion in suggestions[:ROOMSCAN_SUMMARY_RECOMMENDATIONS_COUNT]:
             tips_list.addItem(suggestion)
@@ -257,14 +395,13 @@ class SessionCompareDialog(QDialog):
         session_a, session_b = comparison["session_a"], comparison["session_b"]
         self.setWindowTitle("Compare Two Scans")
         self.resize(ROOMSCAN_COMPARE_DIALOG_WIDTH, ROOMSCAN_COMPARE_DIALOG_HEIGHT)
-        self.setStyleSheet(f"background-color: {PANEL_BG}; color: {TEXT};")
 
         layout = QVBoxLayout(self)
         header = QLabel(
             f"A: {session_a['room_name']}  ({session_a['timestamp']})    vs.    "
             f"B: {session_b['room_name']}  ({session_b['timestamp']})"
         )
-        header.setStyleSheet(f"color: {ACCENT}; font-size: 14px; font-weight: 600;")
+        header.setStyleSheet(f"color: {RS_AMBER}; font-size: 14px; font-weight: 600;")
         header.setWordWrap(True)
         layout.addWidget(header)
 
@@ -274,7 +411,6 @@ class SessionCompareDialog(QDialog):
         table.verticalHeader().setVisible(False)
         table.setEditTriggers(QTableWidget.NoEditTriggers)
         table.horizontalHeader().setStretchLastSection(True)
-        table.setStyleSheet(f"background-color: {SURFACE_BG}; border: none;")
         for row, device in enumerate(comparison["devices"]):
             values = [
                 device["display_name"],
@@ -297,7 +433,7 @@ class SessionCompareDialog(QDialog):
             f"kWh/yr {_fmt_delta(delta['kwh_per_year'])}   "
             f"$/yr {_fmt_delta(delta['cost_per_year_usd'])}"
         )
-        delta_label.setStyleSheet(f"color: {SUCCESS}; font-weight: 600;")
+        delta_label.setStyleSheet(f"color: {RS_GOOD}; font-weight: 600;")
         layout.addWidget(delta_label)
 
         close_button = QPushButton("Close")
@@ -335,7 +471,11 @@ class RoomScanDashboard(QMainWindow):
             )
         self.setWindowTitle(title)
         self.setFixedSize(ROOMSCAN_DASHBOARD_WINDOW_WIDTH, ROOMSCAN_DASHBOARD_WINDOW_HEIGHT)
-        self.setStyleSheet(f"background-color: {PANEL_BG}; color: {TEXT};")
+        # Applied at the QApplication level (not self.setStyleSheet) so it
+        # reliably cascades to the modal dialogs below too.
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(_APP_QSS)
 
         self._build_ui()
         self._show_pre_scan_placeholders()
@@ -353,12 +493,12 @@ class RoomScanDashboard(QMainWindow):
 
     def _panel(self, title: str, fixed_width: Optional[int] = None) -> QWidget:
         frame = QWidget()
+        frame.setObjectName("panel")
         if fixed_width is not None:
             frame.setFixedWidth(fixed_width)
-        frame.setStyleSheet(f"background-color: {SURFACE_BG}; border: 1px solid {BORDER}; border-radius: 10px;")
         layout = QVBoxLayout(frame)
         heading = QLabel(title)
-        heading.setStyleSheet(f"color: {ACCENT}; font-size: 15px; font-weight: 600; border: none;")
+        heading.setObjectName("panelHeading")
         layout.addWidget(heading)
         frame._content_layout = layout  # stash for callers to keep adding widgets
         return frame
@@ -386,6 +526,7 @@ class RoomScanDashboard(QMainWindow):
         layout.addWidget(self._room_name_edit)
 
         self._start_button = QPushButton("Start Scan")
+        self._start_button.setObjectName("primaryButton")
         self._start_button.clicked.connect(self._on_start_clicked)
         layout.addWidget(self._start_button)
 
@@ -409,23 +550,26 @@ class RoomScanDashboard(QMainWindow):
         layout.addLayout(status_row)
 
         sessions_heading = QLabel("Past Scans")
-        sessions_heading.setStyleSheet(f"color: {ACCENT}; font-size: 13px; font-weight: 600; border: none;")
+        sessions_heading.setObjectName("panelHeading")
         layout.addWidget(sessions_heading)
         self._sessions_list = QListWidget()
         self._sessions_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self._sessions_list.setStyleSheet(f"background-color: {PANEL_BG}; border: 1px solid {BORDER};")
+        self._sessions_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         layout.addWidget(self._sessions_list, 1)
 
         session_buttons_row = QHBoxLayout()
         self._review_button = QPushButton("View Report")
+        self._review_button.setObjectName("ghostButton")
         self._review_button.clicked.connect(self._on_review_clicked)
         session_buttons_row.addWidget(self._review_button)
         self._compare_button = QPushButton("Compare")
+        self._compare_button.setObjectName("ghostButton")
         self._compare_button.clicked.connect(self._on_compare_clicked)
         session_buttons_row.addWidget(self._compare_button)
         layout.addLayout(session_buttons_row)
 
         self._export_sessions_button = QPushButton("Export All Scans (CSV)...")
+        self._export_sessions_button.setObjectName("ghostButton")
         self._export_sessions_button.clicked.connect(self._on_export_sessions_clicked)
         layout.addWidget(self._export_sessions_button)
 
@@ -438,7 +582,7 @@ class RoomScanDashboard(QMainWindow):
         self._camera_label.setAlignment(Qt.AlignCenter)
         self._camera_label.setWordWrap(True)
         self._camera_label.setFixedSize(ROOMSCAN_DASHBOARD_CAMERA_WIDTH, ROOMSCAN_DASHBOARD_CAMERA_HEIGHT)
-        self._camera_label.setStyleSheet(f"background-color: #000; color: {MUTED}; border: none;")
+        self._camera_label.setStyleSheet(f"background-color: #000; color: {RS_MUTED}; border: 1px solid {RS_BORDER};")
         layout.addWidget(self._camera_label)
         # "AI just ran" indicator (see _update_ai_indicator): hidden until the
         # background Gemini live-verification/discovery pass is actually
@@ -446,26 +590,34 @@ class RoomScanDashboard(QMainWindow):
         # as _gemini_flag_label/_gemini_discovered_label below.
         self._ai_status_label = QLabel("")
         self._ai_status_label.setAlignment(Qt.AlignCenter)
-        self._ai_status_label.setStyleSheet(f"color: {ACCENT}; font-size: 12px; font-weight: 600; border: none;")
+        self._ai_status_label.setStyleSheet(f"color: {RS_AMBER}; font-size: 12px; font-weight: 600;")
         self._ai_status_label.hide()
         layout.addWidget(self._ai_status_label)
         layout.addStretch(1)
         return panel
 
-    def _hero_stat_row(self, layout: QVBoxLayout, icon: str, caption: str) -> QLabel:
+    def _hero_stat_row(self, layout: QVBoxLayout, caption: str) -> QLabel:
+        """The "meter register window" signature element: the one place of
+        visual boldness in this theme, everything else stays quiet around it."""
+        meter = QWidget()
+        meter.setObjectName("meterWindow")
+        meter_layout = QVBoxLayout(meter)
         value_label = QLabel("--")
-        value_label.setStyleSheet(f"color: {SUCCESS}; font-size: 40px; font-weight: 800; border: none;")
-        caption_label = QLabel(f"{icon} {caption}")
-        caption_label.setStyleSheet(f"color: {TEXT}; font-size: 13px; font-weight: 600; border: none;")
-        layout.addWidget(value_label)
-        layout.addWidget(caption_label)
+        value_label.setObjectName("meterValue")
+        value_label.setAlignment(Qt.AlignCenter)
+        meter_layout.addWidget(value_label)
+        caption_label = QLabel(caption)
+        caption_label.setObjectName("meterCaption")
+        caption_label.setAlignment(Qt.AlignCenter)
+        meter_layout.addWidget(caption_label)
+        layout.addWidget(meter)
         return value_label
 
-    def _stat_row(self, layout: QVBoxLayout, icon: str, caption: str) -> QLabel:
+    def _stat_row(self, layout: QVBoxLayout, caption: str) -> QLabel:
         value_label = QLabel("--")
-        value_label.setStyleSheet(f"color: {ACCENT}; font-size: 24px; font-weight: 700; border: none;")
-        caption_label = QLabel(f"{icon} {caption}")
-        caption_label.setStyleSheet(f"color: {MUTED}; font-size: 12px; border: none;")
+        value_label.setObjectName("statValue")
+        caption_label = QLabel(caption)
+        caption_label.setObjectName("statCaption")
         layout.addWidget(value_label)
         layout.addWidget(caption_label)
         return value_label
@@ -475,11 +627,11 @@ class RoomScanDashboard(QMainWindow):
         layout = panel._content_layout
         # Cost is the headline number non-technical viewers care about most,
         # so it's rendered as a hero stat; the rest are supporting detail.
-        self._cost_value = self._hero_stat_row(layout, "\U0001F4B0", "Estimated Cost Per Year")
+        self._cost_value = self._hero_stat_row(layout, "Estimated Cost Per Year")
         layout.addSpacing(8)
-        self._watts_value = self._stat_row(layout, "⚡", "Power In Use Right Now")
-        self._kwh_day_value = self._stat_row(layout, "\U0001F506", "Energy Used Per Day")
-        self._kwh_year_value = self._stat_row(layout, "\U0001F4C8", "Energy Used Per Year")
+        self._watts_value = self._stat_row(layout, "Power In Use Right Now")
+        self._kwh_day_value = self._stat_row(layout, "Energy Used Per Day")
+        self._kwh_year_value = self._stat_row(layout, "Energy Used Per Year")
         layout.addStretch(1)
         return panel
 
@@ -494,7 +646,6 @@ class RoomScanDashboard(QMainWindow):
         self._device_table.horizontalHeader().setStretchLastSection(True)
         self._device_table.verticalHeader().setVisible(False)
         self._device_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self._device_table.setStyleSheet(f"background-color: {PANEL_BG}; border: none;")
         devices_panel._content_layout.addWidget(self._device_table)
         # Gemini live-verification/discovery surfacing: a warning banner when
         # a class was auto-corrected (rejected) this scan, and a note listing
@@ -504,26 +655,26 @@ class RoomScanDashboard(QMainWindow):
         # _on_start_clicked's leftover-results clear.
         self._gemini_flag_label = QLabel("")
         self._gemini_flag_label.setWordWrap(True)
-        self._gemini_flag_label.setStyleSheet(f"color: {WARNING}; font-size: 12px; border: none;")
+        self._gemini_flag_label.setStyleSheet(f"color: {RS_WARN}; font-size: 12px;")
         self._gemini_flag_label.hide()
         devices_panel._content_layout.addWidget(self._gemini_flag_label)
         self._gemini_discovered_label = QLabel("")
         self._gemini_discovered_label.setWordWrap(True)
-        self._gemini_discovered_label.setStyleSheet(f"color: {MUTED}; font-size: 12px; border: none;")
+        self._gemini_discovered_label.setStyleSheet(f"color: {RS_MUTED}; font-size: 12px;")
         self._gemini_discovered_label.hide()
         devices_panel._content_layout.addWidget(self._gemini_discovered_label)
         row.addWidget(devices_panel, 2)
 
         drains_panel = self._panel("Biggest Energy Users", fixed_width=ROOMSCAN_DASHBOARD_RIGHT_WIDTH)
         self._top_drains_list = QListWidget()
-        self._top_drains_list.setStyleSheet(f"background-color: {PANEL_BG}; border: none;")
+        self._top_drains_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         drains_panel._content_layout.addWidget(self._top_drains_list)
         row.addWidget(drains_panel, 1)
 
         actions_panel = self._panel("Ways To Save Energy", fixed_width=ROOMSCAN_DASHBOARD_RIGHT_WIDTH)
         self._recommendations_list = QListWidget()
         self._recommendations_list.setWordWrap(True)
-        self._recommendations_list.setStyleSheet(f"background-color: {PANEL_BG}; border: none;")
+        self._recommendations_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         actions_panel._content_layout.addWidget(self._recommendations_list)
         row.addWidget(actions_panel, 1)
 
@@ -540,7 +691,7 @@ class RoomScanDashboard(QMainWindow):
         table.setSpan(0, 0, 1, len(DEVICE_TABLE_HEADERS))
         item = QTableWidgetItem(message)
         item.setTextAlignment(Qt.AlignCenter)
-        item.setForeground(QColor(MUTED))
+        item.setForeground(QColor(RS_MUTED))
         table.setItem(0, 0, item)
 
     def _show_pre_scan_placeholders(self) -> None:
@@ -735,13 +886,13 @@ class RoomScanDashboard(QMainWindow):
         any previously set QLabel pixmap, so the panel is never left showing
         a stale frame alongside a state message that contradicts it."""
         self._camera_label.setText(message)
-        self._camera_label.setStyleSheet(f"background-color: #000; color: {color}; border: none;")
+        self._camera_label.setStyleSheet(f"background-color: #000; color: {color}; border: 1px solid {RS_BORDER};")
 
     def _show_connecting(self) -> None:
-        self._set_camera_message(CONNECTING_MESSAGE, MUTED)
+        self._set_camera_message(CONNECTING_MESSAGE, RS_MUTED)
 
     def _show_waiting_for_frame(self) -> None:
-        self._set_camera_message(WAITING_FOR_FRAME_MESSAGE, MUTED)
+        self._set_camera_message(WAITING_FOR_FRAME_MESSAGE, RS_MUTED)
 
     def _show_stale_frame_warning(self, elapsed_s: float) -> None:
         if not self._logged_stale_frame_warning:
@@ -749,14 +900,14 @@ class RoomScanDashboard(QMainWindow):
             self._logged_stale_frame_warning = True
         self._set_camera_message(
             f"⚠ Still no live RGB frames after {elapsed_s:.0f}s.\nCheck the Aria streaming connection.",
-            WARNING,
+            RS_WARN,
         )
 
     def _show_camera_error(self, message: str) -> None:
         if message != self._last_camera_error:
             logger.error("Live camera feed error: %s", message)
             self._last_camera_error = message
-        self._set_camera_message(f"⚠ {CAMERA_ERROR_PREFIX}\n{message}", DANGER)
+        self._set_camera_message(f"⚠ {CAMERA_ERROR_PREFIX}\n{message}", RS_BAD)
 
     def _draw_detection_boxes(self, frame: np.ndarray) -> np.ndarray:
         """Draw a box + label over each currently confirmed live detection,
@@ -927,7 +1078,7 @@ class RoomScanDashboard(QMainWindow):
         for suggestion in generate_recommendations(devices, totals, context):
             item = QListWidgetItem(suggestion)
             if suggestion == NO_DEVICES_MESSAGE:
-                item.setForeground(QColor(MUTED))
+                item.setForeground(QColor(RS_MUTED))
             self._recommendations_list.addItem(item)
 
     def _update_gemini_flag(self, rejected_classes: List[str]) -> None:
@@ -960,7 +1111,7 @@ class RoomScanDashboard(QMainWindow):
 
         if state.get("gemini_pass_active"):
             self._ai_status_label.setText("✨ Gemini AI checking detections...")
-            self._ai_status_label.setStyleSheet(f"color: {ACCENT}; font-size: 12px; font-weight: 600; border: none;")
+            self._ai_status_label.setStyleSheet(f"color: {RS_AMBER}; font-size: 12px; font-weight: 600;")
             self._ai_status_label.show()
             return
 
@@ -971,7 +1122,7 @@ class RoomScanDashboard(QMainWindow):
 
         if self._ai_flash_until is not None and time.monotonic() < self._ai_flash_until:
             self._ai_status_label.setText("✓ Gemini AI check complete")
-            self._ai_status_label.setStyleSheet(f"color: {SUCCESS}; font-size: 12px; font-weight: 600; border: none;")
+            self._ai_status_label.setStyleSheet(f"color: {RS_GOOD}; font-size: 12px; font-weight: 600;")
             self._ai_status_label.show()
         else:
             self._ai_status_label.hide()

@@ -28,6 +28,8 @@ detector that recognizes those classes is plugged in.
 
 from typing import Callable, Dict, List, Optional
 
+from config import ENERGY_COST_PER_KWH_USD, GEMINI_BULB_TYPE_WATTS
+
 STANDBY_SHARE_THRESHOLD = 0.5       # suggest unplugging if standby is >= half a device's yearly energy
 HIGH_DRAW_WATTS_THRESHOLD = 1000.0  # active draw above which "reduce usage" is worth flagging
 LOW_IMPACT_COST_USD = 25.0          # below this, there's not much to act on yet
@@ -35,6 +37,19 @@ BRIGHT_ROOM_LUMINANCE_THRESHOLD = 140.0  # mean 0-255 RGB pixel value treated as
 MULTI_SCREEN_COUNT_THRESHOLD = 2         # >= this many "tv"-class detections reads as multiple monitors
 COOLING_CLASS_NAMES = ("fan", "air conditioner")
 NO_DEVICES_MESSAGE = "No appliances detected yet -- keep scanning to get suggestions."
+
+# Gemini-discovered-device rules (source == GEMINI_DISCOVERED_SOURCE) key off
+# keyword matches in the device's class/display name and Gemini's own notes
+# (its free-text description, e.g. "incandescent ceiling light") rather than a
+# fixed catalog lookup, since discovered devices are open-vocabulary by design.
+GEMINI_DISCOVERED_SOURCE = "gemini_discovered"
+INEFFICIENT_BULB_KEYWORDS = ("incandescent", "halogen", "fluorescent", "cfl")
+LIGHTING_KEYWORDS = ("light", "lamp", "bulb", "fixture", "chandelier", "sconce")
+MULTI_LIGHT_COUNT_THRESHOLD = 3  # >= this many instances of one discovered lighting type
+PHANTOM_LOAD_KEYWORDS = (
+    "power strip", "charger", "speaker", "hub", "router", "modem", "console", "printer",
+)
+VENT_KEYWORDS = ("vent", "duct", "register")
 
 Device = Dict[str, object]
 Totals = Dict[str, object]
@@ -54,6 +69,14 @@ def _standby_share(device: Device) -> float:
 
 def _device_by_class(devices: List[Device], class_name: str) -> Optional[Device]:
     return next((d for d in devices if d["class_name"] == class_name), None)
+
+
+def _discovered_device_text(device: Device) -> str:
+    """Lowercased class/display name + Gemini's notes, for keyword matching
+    against open-vocabulary discovered devices (no fixed catalog to key off)."""
+    parts = [str(device.get("class_name", "")), str(device.get("display_name", ""))]
+    parts.extend(str(note) for note in device.get("notes", []) or [])
+    return " ".join(parts).lower()
 
 
 def _rule_tv_in_bright_room(devices: List[Device], totals: Totals, context: Context) -> List[str]:
@@ -97,6 +120,79 @@ def _rule_cooling_inefficiency(devices: List[Device], totals: Totals, context: C
     ]
 
 
+def _rule_inefficient_bulb_swap(devices: List[Device], totals: Totals, context: Context) -> List[str]:
+    suggestions: List[str] = []
+    led_watts = GEMINI_BULB_TYPE_WATTS.get("led", 9.0)
+    for device in devices:
+        if device.get("source") != GEMINI_DISCOVERED_SOURCE:
+            continue
+        text = _discovered_device_text(device)
+        if not any(keyword in text for keyword in INEFFICIENT_BULB_KEYWORDS):
+            continue
+        watts_active = float(device["watts_active"])
+        if watts_active <= led_watts:
+            continue
+        count = int(device["count"])
+        hours = float(device["hours_per_day"])
+        led_kwh_per_year = led_watts * hours * count * 365.0 / 1000.0
+        savings_usd = (float(device["kwh_per_year"]) - led_kwh_per_year) * ENERGY_COST_PER_KWH_USD
+        if savings_usd <= 0:
+            continue
+        suggestions.append(
+            f"{device['display_name']} looks like an older, less-efficient bulb type -- swapping to "
+            f"LED could save roughly ${savings_usd:.0f}/yr."
+        )
+    return suggestions
+
+
+def _rule_multiple_discovered_lights(devices: List[Device], totals: Totals, context: Context) -> List[str]:
+    suggestions: List[str] = []
+    for device in devices:
+        if device.get("source") != GEMINI_DISCOVERED_SOURCE:
+            continue
+        text = _discovered_device_text(device)
+        if not any(keyword in text for keyword in LIGHTING_KEYWORDS):
+            continue
+        count = int(device["count"])
+        if count < MULTI_LIGHT_COUNT_THRESHOLD:
+            continue
+        suggestions.append(
+            f"{count}x {device['display_name']} detected -- a smart switch or motion sensor for this "
+            f"fixture group makes it easy to avoid leaving them all on unnecessarily."
+        )
+    return suggestions
+
+
+def _rule_phantom_load_discovered(devices: List[Device], totals: Totals, context: Context) -> List[str]:
+    suggestions: List[str] = []
+    for device in devices:
+        if device.get("source") != GEMINI_DISCOVERED_SOURCE:
+            continue
+        text = _discovered_device_text(device)
+        if not any(keyword in text for keyword in PHANTOM_LOAD_KEYWORDS):
+            continue
+        suggestions.append(
+            f"{device['display_name']} draws power even when idle -- a smart plug or a power strip "
+            f"with a physical switch makes it easy to cut this phantom load when it's not in use."
+        )
+    return suggestions
+
+
+def _rule_vent_discovered(devices: List[Device], totals: Totals, context: Context) -> List[str]:
+    suggestions: List[str] = []
+    for device in devices:
+        if device.get("source") != GEMINI_DISCOVERED_SOURCE:
+            continue
+        text = _discovered_device_text(device)
+        if not any(keyword in text for keyword in VENT_KEYWORDS):
+            continue
+        suggestions.append(
+            f"{device['display_name']} spotted -- make sure it isn't blocked by furniture or rugs, "
+            f"and keep its filter clean so HVAC doesn't have to work harder than necessary."
+        )
+    return suggestions
+
+
 def _rule_biggest_draw(devices: List[Device], totals: Totals, context: Context) -> List[str]:
     top = devices[0]
     if top["watts_active"] < HIGH_DRAW_WATTS_THRESHOLD:
@@ -129,13 +225,19 @@ def _rule_low_impact_fallback(devices: List[Device], totals: Totals, context: Co
 
 
 # Order: device+context co-occurrence rules first (most specific/actionable),
-# then the original threshold-based rules, with the "keep scanning" fallback
-# last since it's a catch-all rather than a specific action.
+# then the Gemini-discovered-device keyword rules (also specific/actionable,
+# just open-vocabulary instead of catalog-keyed), then the original
+# threshold-based rules, with the "keep scanning" fallback last since it's a
+# catch-all rather than a specific action.
 _RULES: List[Rule] = [
     _rule_tv_in_bright_room,
     _rule_multiple_screens,
     _rule_always_on_fridge,
     _rule_cooling_inefficiency,
+    _rule_inefficient_bulb_swap,
+    _rule_multiple_discovered_lights,
+    _rule_phantom_load_discovered,
+    _rule_vent_discovered,
     _rule_biggest_draw,
     _rule_standby_heavy,
     _rule_low_impact_fallback,

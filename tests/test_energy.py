@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +42,17 @@ from energy_recommendations import NO_DEVICES_MESSAGE, generate_recommendations
 
 def det(name: str, conf: float, box=(10, 10, 50, 50)) -> Detection:
     return Detection(class_name=name, confidence=conf, box_xyxy=box)
+
+
+def discovered_device(name: str, watts_active: float, hours_per_day: float, count: int, notes=None) -> dict:
+    """Build a priced Gemini-discovered device dict (mirrors
+    roomscan.py:merge_discovered_devices' shape) for recommendation tests."""
+    device = asdict(estimate_discovered_device(name, watts_active, hours_per_day, count))
+    device["confidences"] = []
+    device["crops"] = []
+    device["notes"] = notes or []
+    device["source"] = "gemini_discovered"
+    return device
 
 
 def frame(fill: int) -> np.ndarray:
@@ -653,6 +665,42 @@ class RecommendationTests(unittest.TestCase):
         suggestions = generate_recommendations(fan_only["devices"], fan_only["totals"])
         self.assertFalse(any("Fan and air conditioner" in s for s in suggestions))
 
+    def test_inefficient_bulb_flagged_for_led_swap(self) -> None:
+        device = discovered_device("Ceiling Light", 60.0, 5.0, 1, notes=["Incandescent ceiling light"])
+        suggestions = generate_recommendations([device], {"cost_per_year_usd": device["cost_per_year_usd"]})
+        self.assertTrue(any("LED" in s and "Ceiling Light" in s for s in suggestions))
+
+    def test_led_discovered_device_not_flagged_for_swap(self) -> None:
+        device = discovered_device("Ceiling Light", 9.0, 5.0, 1, notes=["LED ceiling light"])
+        suggestions = generate_recommendations([device], {"cost_per_year_usd": device["cost_per_year_usd"]})
+        self.assertFalse(any("swapping to" in s for s in suggestions))
+
+    def test_catalog_device_not_flagged_for_bulb_swap(self) -> None:
+        # source is absent (not "gemini_discovered"), so keyword text shouldn't matter.
+        result = estimate_room({"tv": 1})
+        suggestions = generate_recommendations(result["devices"], result["totals"])
+        self.assertFalse(any("swapping to" in s for s in suggestions))
+
+    def test_multiple_discovered_lights_flagged(self) -> None:
+        device = discovered_device("Floor Lamp", 40.0, 4.0, 4, notes=["Floor lamp"])
+        suggestions = generate_recommendations([device], {"cost_per_year_usd": device["cost_per_year_usd"]})
+        self.assertTrue(any("smart switch" in s for s in suggestions))
+
+    def test_single_discovered_light_not_flagged_for_multiple(self) -> None:
+        device = discovered_device("Floor Lamp", 40.0, 4.0, 1, notes=["Floor lamp"])
+        suggestions = generate_recommendations([device], {"cost_per_year_usd": device["cost_per_year_usd"]})
+        self.assertFalse(any("smart switch" in s for s in suggestions))
+
+    def test_phantom_load_device_flagged(self) -> None:
+        device = discovered_device("Power Strip", 3.0, 24.0, 1, notes=["Power strip under desk"])
+        suggestions = generate_recommendations([device], {"cost_per_year_usd": device["cost_per_year_usd"]})
+        self.assertTrue(any("phantom load" in s for s in suggestions))
+
+    def test_vent_device_flagged(self) -> None:
+        device = discovered_device("Air Vent", 0.0, 0.0, 1, notes=["Wall-mounted air vent"])
+        suggestions = generate_recommendations([device], {"cost_per_year_usd": device["cost_per_year_usd"]})
+        self.assertTrue(any("blocked by furniture" in s for s in suggestions))
+
 
 class ReportRecommendationsTests(unittest.TestCase):
     def test_build_report_includes_recommendations(self) -> None:
@@ -724,6 +772,43 @@ class ReportRecommendationsTests(unittest.TestCase):
         self.assertIn("Kettle", page)
         self.assertIn("Seen 2x this scan", page)
         self.assertIn('<span class="ai-badge">AI</span>', page)
+
+    def test_render_html_includes_category_breakdown(self) -> None:
+        import tempfile
+
+        from roomscan import build_report
+        from energy_report import render_html
+
+        agg = ApplianceScanAggregator()
+        agg.observe_frame([det("refrigerator", 0.7)], frame(10))
+        discovered = [{"name": "Ceiling Light", "description": "LED ceiling light.", "watts_active": 9.0, "hours_per_day": 5.0}]
+        report = build_report("Kitchen", "test", agg, {}, 1.0, gemini_discovered_devices=discovered)
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            html_path = out_dir / "report.html"
+            render_html(report, out_dir, html_path)
+            page = html_path.read_text(encoding="utf-8")
+        self.assertIn("Breakdown by Category", page)
+        self.assertIn("Kitchen &amp; Major Appliances", page)
+        self.assertIn("Lighting", page)
+
+    def test_render_html_omits_category_breakdown_when_no_devices(self) -> None:
+        import tempfile
+
+        from energy_report import render_html
+
+        report = {
+            "scan": {"room_name": "Empty", "source": "test", "generated_at": "now", "frames_sampled": 0},
+            "devices": [],
+            "totals": {"device_count": 0, "kwh_per_day": 0.0, "kwh_per_year": 0.0, "cost_per_year_usd": 0.0, "cost_per_kwh_usd": 0.17},
+            "recommendations": [],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp)
+            html_path = out_dir / "report.html"
+            render_html(report, out_dir, html_path)
+            page = html_path.read_text(encoding="utf-8")
+        self.assertNotIn("Breakdown by Category", page)
 
     def test_render_html_omits_ai_badge_when_no_discovered_devices(self) -> None:
         import tempfile

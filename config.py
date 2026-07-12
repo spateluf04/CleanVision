@@ -405,12 +405,30 @@ ROOMSCAN_EFFICIENCY_FAIR_MAX_COST_USD = 400.0
 # overlay is drawn directly on the same upright RGB frame array the label
 # displays -- cv2 draw calls don't care about channel order, only that the
 # color tuple and the image agree.
-ROOMSCAN_DETECTION_BOX_COLOR_RGB = (61, 214, 255)  # matches ACCENT
+ROOMSCAN_DETECTION_BOX_COLOR_RGB = (232, 163, 61)  # matches RS_AMBER
 ROOMSCAN_DETECTION_BOX_THICKNESS = 2
 # "AI just ran" flash indicator under the camera view (roomscan_dashboard.py):
 # how long the "Gemini AI check complete" message stays visible after a live
 # verification/discovery pass finishes, before the label hides itself again.
 ROOMSCAN_AI_FLASH_DURATION_S = 2.5
+
+# RoomScan dashboard theme (roomscan_dashboard.py only). Deliberately separate
+# from the PANEL_BG/SURFACE_BG/ACCENT/SUCCESS/WARNING/DANGER/TEXT/MUTED/BORDER
+# palette above -- that one is shared with training_dashboard.py, which this
+# reskin does not touch. "Warm energy-instrument" identity: graphite/charcoal
+# surfaces, a single amber meter-lamp accent, mono numerals for readouts.
+RS_BG = "#151210"
+RS_SURFACE = "#1E1A15"
+RS_SURFACE_INSET = "#0E0C0A"
+RS_BORDER = "#372F23"
+RS_AMBER = "#E8A33D"
+RS_AMBER_HOVER = "#F2B457"
+RS_TEXT = "#EFE8DA"
+RS_MUTED = "#9C8F7B"
+RS_GOOD = "#8FBF6F"
+RS_WARN = RS_AMBER
+RS_BAD = "#E06A4E"
+RS_MONO_FONT_STACK = "'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace"
 
 
 if __name__ == "__main__":
